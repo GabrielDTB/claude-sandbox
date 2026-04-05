@@ -117,6 +117,7 @@ EOF
       enableFakechroot = true;
 
       config = {
+        User = "1000:1000";
         Env = [
           "HOME=/home/user"
           "USER=user"

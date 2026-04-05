@@ -58,8 +58,9 @@ let
         --hostname sandbox
         --hosts-file none
         --read-only
-        --tmpfs /tmp:rw,nosuid,nodev
-        --tmpfs /home/user:rw,nosuid,nodev
+        --userns=keep-id:uid=1000,gid=1000
+        --tmpfs /tmp:rw,nosuid,nodev,mode=1777
+        --tmpfs /home/user:rw,nosuid,nodev,mode=0777
         --network "pasta:--no-map-gw,--map-guest-addr,none,-T,${authProxyPort}:$PROXY_HOST_PORT"
         --dns 1.1.1.1 --dns 1.0.0.1 --dns 8.8.8.8
         --dns-search .
