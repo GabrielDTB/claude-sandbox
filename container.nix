@@ -25,7 +25,7 @@
   gzip,
   unzip,
   python3,
-  openssl,
+  # openssl,
   gh,
   iputils,
   defaultTools ? null,
@@ -59,7 +59,7 @@ let
     gzip
     unzip
     python3
-    openssl
+    # openssl
     gh
     iputils
   ];
@@ -94,24 +94,24 @@ let
       contents = [ env ];
 
       fakeRootCommands = ''
-        mkdir -p ./home/user ./workspace ./tmp
-        mkdir -p ./usr ./usr/local/bin
+                mkdir -p ./home/user ./workspace ./tmp
+                mkdir -p ./usr ./usr/local/bin
 
-        # Standard FHS symlinks so tools find things at expected paths.
-        ln -s ../bin ./usr/bin
-        ln -s ../lib ./usr/lib
-        ln -s ../lib64 ./usr/lib64
-        rm -rf ./sbin
-        ln -s bin ./sbin
-        ln -s ../bin ./usr/sbin
-        ln -s ../share ./usr/share
+                # Standard FHS symlinks so tools find things at expected paths.
+                ln -s ../bin ./usr/bin
+                ln -s ../lib ./usr/lib
+                ln -s ../lib64 ./usr/lib64
+                rm -rf ./sbin
+                ln -s bin ./sbin
+                ln -s ../bin ./usr/sbin
+                ln -s ../share ./usr/share
 
-        cat > ./etc/nsswitch.conf <<'EOF'
-hosts: files dns
-EOF
+                cat > ./etc/nsswitch.conf <<'EOF'
+        hosts: files dns
+        EOF
 
-        echo 'user:x:1000:1000:user:/home/user:/bin/bash' > ./etc/passwd
-        echo 'user:x:1000:' > ./etc/group
+                echo 'user:x:1000:1000:user:/home/user:/bin/bash' > ./etc/passwd
+                echo 'user:x:1000:' > ./etc/group
       '';
 
       enableFakechroot = true;
@@ -136,32 +136,35 @@ EOF
           "DISABLE_UPGRADE_COMMAND=1"
           "DISABLE_LOGIN_COMMAND=1"
           "DISABLE_LOGOUT_COMMAND=1"
-        ] ++ extraEnvList;
+        ]
+        ++ extraEnvList;
         WorkingDir = "/workspace";
       };
     };
 
-  seccompProfile = writeText "seccomp.json" (builtins.toJSON {
-    defaultAction = "SCMP_ACT_ALLOW";
-    syscalls = [
-      {
-        # Only syscalls not already blocked by podman's default seccomp profile.
-        # Everything else (mount, ptrace, unshare, kexec, bpf, etc.) is
-        # already blocked by podman defaults.
-        names = [
-          # Symlink creation — cross-boundary attack vector
-          "symlink"
-          "symlinkat"
+  seccompProfile = writeText "seccomp.json" (
+    builtins.toJSON {
+      defaultAction = "SCMP_ACT_ALLOW";
+      syscalls = [
+        {
+          # Only syscalls not already blocked by podman's default seccomp profile.
+          # Everything else (mount, ptrace, unshare, kexec, bpf, etc.) is
+          # already blocked by podman defaults.
+          names = [
+            # Symlink creation — cross-boundary attack vector
+            "symlink"
+            "symlinkat"
 
-          # FIFO creation (device nodes already blocked by podman)
-          "mknod"
-          "mknodat"
-        ];
-        action = "SCMP_ACT_ERRNO";
-        errnoRet = 1;
-      }
-    ];
-  });
+            # FIFO creation (device nodes already blocked by podman)
+            "mknod"
+            "mknodat"
+          ];
+          action = "SCMP_ACT_ERRNO";
+          errnoRet = 1;
+        }
+      ];
+    }
+  );
 
   proxyEnv = buildEnv {
     name = "proxy-env";
@@ -185,11 +188,11 @@ EOF
     contents = [ proxyEnv ];
 
     fakeRootCommands = ''
-      cat > ./etc/nsswitch.conf <<'EOF'
-hosts: files dns
-EOF
-      echo 'proxy:x:1000:1000:proxy:/tmp:/bin/false' > ./etc/passwd
-      echo 'proxy:x:1000:' > ./etc/group
+            cat > ./etc/nsswitch.conf <<'EOF'
+      hosts: files dns
+      EOF
+            echo 'proxy:x:1000:1000:proxy:/tmp:/bin/false' > ./etc/passwd
+            echo 'proxy:x:1000:' > ./etc/group
     '';
 
     enableFakechroot = true;
@@ -215,6 +218,20 @@ EOF
   };
 in
 {
-  inherit image minimalImage proxyImage seccompProfile allPackages;
-  inherit python3 coreutils bash git claude-code ncurses gnugrep;
+  inherit
+    image
+    minimalImage
+    proxyImage
+    seccompProfile
+    allPackages
+    ;
+  inherit
+    python3
+    coreutils
+    bash
+    git
+    claude-code
+    ncurses
+    gnugrep
+    ;
 }
