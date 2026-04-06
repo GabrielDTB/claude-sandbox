@@ -125,6 +125,17 @@ EOF
           "TMPDIR=/tmp"
           "PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
           "TERMINFO_DIRS=/share/terminfo"
+          # Privacy: disable all telemetry and non-essential network traffic.
+          "DISABLE_TELEMETRY=1"
+          "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"
+          "DISABLE_ERROR_REPORTING=1"
+          "DISABLE_AUTOUPDATER=1"
+          # UX: disable features that don't work in a container.
+          "DISABLE_FEEDBACK_SURVEY=1"
+          "DISABLE_BUG_COMMAND=1"
+          "DISABLE_UPGRADE_COMMAND=1"
+          "DISABLE_LOGIN_COMMAND=1"
+          "DISABLE_LOGOUT_COMMAND=1"
         ] ++ extraEnvList;
         WorkingDir = "/workspace";
       };
