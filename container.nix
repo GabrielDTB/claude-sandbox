@@ -185,10 +185,6 @@ let
           # Everything else (mount, ptrace, unshare, kexec, bpf, etc.) is
           # already blocked by podman defaults.
           names = [
-            # Symlink creation — cross-boundary attack vector
-            "symlink"
-            "symlinkat"
-
             # FIFO creation (device nodes already blocked by podman)
             "mknod"
             "mknodat"
