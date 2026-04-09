@@ -4,6 +4,7 @@
   dockerTools,
   buildEnv,
   writeText,
+  writeTextDir,
   claude-code,
   coreutils,
   bash,
@@ -31,6 +32,7 @@
   defaultTools ? null,
   extraPackages ? [ ],
   extraEnv ? { },
+  devShell ? null,
 }:
 let
   # Packages Claude Code needs to function.
@@ -65,12 +67,36 @@ let
   ];
 
   toolPackages = if defaultTools != null then defaultTools else builtinTools;
-  allPackages = corePackages ++ toolPackages ++ extraPackages;
+
+  # Extract packages and shell hook from a dev shell derivation (devenv, mkShell, etc.).
+  devShellPackages =
+    if devShell != null then
+      (devShell.buildInputs or [ ])
+      ++ (devShell.nativeBuildInputs or [ ])
+      ++ (devShell.propagatedBuildInputs or [ ])
+      ++ (devShell.propagatedNativeBuildInputs or [ ])
+    else
+      [ ];
+  devShellHook = if devShell != null then (devShell.shellHook or "") else "";
+
+  entrypointScript =
+    if devShellHook != "" then
+      writeTextDir "entrypoint.sh" ''
+        #!/bin/bash
+        ${devShellHook}
+        exec "$@"
+      ''
+    else
+      null;
+
+  hasDevShellPackages = devShellPackages != [ ];
+
+  allPackages = corePackages ++ toolPackages ++ extraPackages ++ devShellPackages;
 
   extraEnvList = lib.mapAttrsToList (k: v: "${k}=${v}") extraEnv;
 
   mkContainerImage =
-    { name, packages }:
+    { name, packages, entrypoint ? null }:
     let
       env = buildEnv {
         name = "${name}-env";
@@ -85,13 +111,17 @@ let
           "/share"
           "/etc"
         ];
+        # devShell packages may overlap with core/builtin packages (e.g. python3).
+        ignoreCollisions = hasDevShellPackages;
       };
     in
     dockerTools.buildLayeredImage {
       inherit name;
       tag = "latest";
 
-      contents = [ env ];
+      # Include the entrypoint in contents so its full closure (store paths
+      # referenced by the shellHook) ends up in the image layers.
+      contents = [ env ] ++ lib.optional (entrypoint != null) entrypoint;
 
       fakeRootCommands = ''
                 mkdir -p ./home/user ./workspace ./tmp
@@ -112,6 +142,7 @@ let
 
                 echo 'user:x:1000:1000:user:/home/user:/bin/bash' > ./etc/passwd
                 echo 'user:x:1000:' > ./etc/group
+
       '';
 
       enableFakechroot = true;
@@ -139,6 +170,9 @@ let
         ]
         ++ extraEnvList;
         WorkingDir = "/workspace";
+      }
+      // lib.optionalAttrs (entrypoint != null) {
+        Entrypoint = [ "/bin/bash" "/entrypoint.sh" ];
       };
     };
 
@@ -210,6 +244,7 @@ let
   image = mkContainerImage {
     name = "claude-sandbox";
     packages = allPackages;
+    entrypoint = entrypointScript;
   };
 
   minimalImage = mkContainerImage {

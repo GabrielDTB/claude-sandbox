@@ -6,9 +6,10 @@
   extraBinds ? [ ],
   extraEnv ? { },
   defaultTools ? null,
+  devShell ? null,
 }:
 let
-  container = callPackage ./container.nix { inherit extraPackages extraEnv defaultTools; };
+  container = callPackage ./container.nix { inherit extraPackages extraEnv defaultTools devShell; };
 
   testLib = ./test-lib.sh;
   testScript = ./test-sandbox.sh;

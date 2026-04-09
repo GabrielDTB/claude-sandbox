@@ -45,6 +45,7 @@
           extraBinds ? [ ],
           extraEnv ? { },
           defaultTools ? null,
+          devShell ? null,
         }:
         let
           pkgs = import nixpkgs {
@@ -53,7 +54,7 @@
           };
         in
         pkgs.callPackage ./package.nix {
-          inherit extraPackages extraBinds extraEnv defaultTools;
+          inherit extraPackages extraBinds extraEnv defaultTools devShell;
         };
     };
 }
