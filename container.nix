@@ -68,30 +68,54 @@ let
 
   toolPackages = if defaultTools != null then defaultTools else builtinTools;
 
-  # Extract packages and shell hook from a dev shell derivation (devenv, mkShell, etc.).
-  devShellPackages =
+  # Capture the devShell's environment by diffing against a bare stdenv build.
+  # Both builds run in the same nix build sandbox, so sandbox-specific vars
+  # (SSL_CERT_FILE=/no-cert-file.crt, NIX_*, TEMP, etc.) are identical in both
+  # and cancel out. Only the devShell's actual contributions remain.
+  bareEnvFile =
     if devShell != null then
-      (devShell.buildInputs or [ ])
-      ++ (devShell.nativeBuildInputs or [ ])
-      ++ (devShell.propagatedBuildInputs or [ ])
-      ++ (devShell.propagatedNativeBuildInputs or [ ])
+      devShell.stdenv.mkDerivation {
+        name = "sandbox-bare-env";
+        dontUnpack = true;
+        installPhase = ''
+          export -p | sort > $out
+        '';
+      }
     else
-      [ ];
-  devShellHook = if devShell != null then (devShell.shellHook or "") else "";
+      null;
+
+  devEnvFile =
+    if devShell != null then
+      devShell.overrideAttrs {
+        name = "sandbox-dev-env";
+        phases = [ "buildPhase" ];
+        buildPhase = ''
+          export -p | sort > full_env
+          (${diffutils}/bin/diff ${bareEnvFile} full_env \
+            | ${gnugrep}/bin/grep '^> ' \
+            | ${gnused}/bin/sed 's/^> //' \
+            > $out) || true
+        '';
+      }
+    else
+      null;
 
   entrypointScript =
-    if devShellHook != "" then
+    if devEnvFile != null then
       writeTextDir "entrypoint.sh" ''
         #!/bin/bash
-        ${devShellHook}
+        BASE_PATH="$PATH"
+        source ${devEnvFile}
+        export PATH="$PATH:$BASE_PATH"
+        export HOME=/home/user
+        export USER=user
+        export TMPDIR=/tmp
         exec "$@"
       ''
     else
       null;
 
-  hasDevShellPackages = devShellPackages != [ ];
-
-  allPackages = corePackages ++ toolPackages ++ extraPackages ++ devShellPackages;
+  allPackages = corePackages ++ toolPackages ++ extraPackages;
 
   extraEnvList = lib.mapAttrsToList (k: v: "${k}=${v}") extraEnv;
 
@@ -111,8 +135,7 @@ let
           "/share"
           "/etc"
         ];
-        # devShell packages may overlap with core/builtin packages (e.g. python3).
-        ignoreCollisions = hasDevShellPackages;
+        ignoreCollisions = devShell != null;
       };
     in
     dockerTools.buildLayeredImage {
