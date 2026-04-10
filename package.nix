@@ -99,6 +99,14 @@ let
 
       ${extraBindFlags}
 
+      if [ "''${DEV_ENV:-0}" = 1 ] && [ -f "$SANDBOX_DIR/dev-closure-paths" ]; then
+        PODMAN_ARGS+=(-v "$SANDBOX_DIR/dev-env.sh:/dev-env.sh:ro")
+        PODMAN_ARGS+=(-v "$SANDBOX_DIR/dev-entrypoint.sh:/dev-entrypoint.sh:ro")
+        while IFS= read -r sp; do
+          PODMAN_ARGS+=(-v "$sp:$sp:ro")
+        done < "$SANDBOX_DIR/dev-closure-paths"
+      fi
+
       podman "''${PODMAN_ARGS[@]}" "$SANDBOX_IMAGE" ${command}
     '';
 
@@ -150,12 +158,14 @@ in
   ANONYMOUS=0
   NO_TOOLS=0
   PERMISSIVE=0
+  DEV_ENV=0
   PASSTHROUGH=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --anonymous)  ANONYMOUS=1; shift ;;
       --no-tools)   NO_TOOLS=1; shift ;;
       --permissive) PERMISSIVE=1; shift ;;
+      --dev-env)    DEV_ENV=1; shift ;;
       --) shift; PASSTHROUGH+=("$@"); break ;;
       *)  PASSTHROUGH+=("$1"); shift ;;
     esac
@@ -189,6 +199,74 @@ in
     SANDBOX_IMAGE="claude-sandbox:latest"
   fi
   ${loadImage { image = container.proxyImage; marker = "proxy-loaded"; }}
+
+  # Runtime dev environment injection: capture the project's devShell environment
+  # and mount its closure into the container.
+  if [ "$DEV_ENV" = 1 ]; then
+    if ! command -v nix &>/dev/null; then
+      echo "error: nix is required for --dev-env" >&2; exit 1
+    fi
+
+    DEV_ENV_CACHE="$SANDBOX_DIR/dev-env.sh"
+    CLOSURE_CACHE="$SANDBOX_DIR/dev-closure-paths"
+    SYSTEM="$(${container.coreutils}/bin/uname -m)-linux"
+
+    # Determine the nix target and lock file for cache invalidation.
+    DEV_ENV_TARGET=""
+    LOCK_FILE=""
+    if [ -f "$BOX_DIR/flake.nix" ]; then
+      DEV_ENV_TARGET="path:$BOX_DIR"
+      LOCK_FILE="$BOX_DIR/flake.lock"
+    elif [ -f "$BOX_DIR/.devenv/flake.nix" ]; then
+      DEV_ENV_TARGET="path:$BOX_DIR/.devenv"
+      LOCK_FILE="$BOX_DIR/devenv.lock"
+    fi
+
+    if [ -z "$DEV_ENV_TARGET" ]; then
+      echo "warning: --dev-env specified but no flake.nix or devenv found in $BOX_DIR" >&2
+      DEV_ENV=0
+    else
+      NEEDS_CAPTURE=0
+      if [ ! -f "$DEV_ENV_CACHE" ] || [ ! -f "$CLOSURE_CACHE" ]; then
+        NEEDS_CAPTURE=1
+      elif [ -n "$LOCK_FILE" ] && [ -f "$LOCK_FILE" ]; then
+        LOCK_HASH=$(${container.coreutils}/bin/sha256sum "$LOCK_FILE" | ${container.coreutils}/bin/cut -d' ' -f1)
+        CACHED_HASH=$(${container.coreutils}/bin/cat "$SANDBOX_DIR/dev-env.hash" 2>/dev/null || echo "")
+        if [ "$LOCK_HASH" != "$CACHED_HASH" ]; then
+          NEEDS_CAPTURE=1
+        fi
+      fi
+
+      if [ "$NEEDS_CAPTURE" = 1 ]; then
+        echo "Capturing dev environment..." >&2
+        nix print-dev-env "$DEV_ENV_TARGET" > "$DEV_ENV_CACHE"
+
+        # Build the devShell and compute its closure — only these store paths
+        # are mounted into the container, not the entire host nix store.
+        DEV_SHELL_OUT=$(nix build "$DEV_ENV_TARGET#devShells.$SYSTEM.default" \
+          --no-link --print-out-paths 2>/dev/null)
+        nix path-info -r "$DEV_SHELL_OUT" | ${container.coreutils}/bin/sort -u > "$CLOSURE_CACHE"
+
+        if [ -n "$LOCK_FILE" ] && [ -f "$LOCK_FILE" ]; then
+          ${container.coreutils}/bin/sha256sum "$LOCK_FILE" \
+            | ${container.coreutils}/bin/cut -d' ' -f1 > "$SANDBOX_DIR/dev-env.hash"
+        fi
+        echo "Dev environment captured ($(${container.coreutils}/bin/wc -l < "$CLOSURE_CACHE") store paths)." >&2
+      fi
+
+      # Write runtime entrypoint that sources the dev env before exec.
+      ${container.coreutils}/bin/cat > "$SANDBOX_DIR/dev-entrypoint.sh" << 'DEVEOF'
+#!/bin/bash
+BASE_PATH="$PATH"
+source /dev-env.sh
+export PATH="$PATH:$BASE_PATH"
+export HOME=/home/user
+export USER=user
+export TMPDIR=/tmp
+exec "$@"
+DEVEOF
+    fi
+  fi
 
   # Stub credentials — Claude Code sees "logged in" and makes API calls through
   # the proxy, which injects the real OAuth token. Container never sees real creds.
@@ -244,6 +322,9 @@ STUBEOF
   CLAUDE_CMD=(${container.claude-code}/bin/claude)
   if [ "$PERMISSIVE" = 1 ]; then
     CLAUDE_CMD+=(--dangerously-skip-permissions)
+  fi
+  if [ "$DEV_ENV" = 1 ]; then
+    CLAUDE_CMD=("${container.bash}/bin/bash" "/dev-entrypoint.sh" "''${CLAUDE_CMD[@]}")
   fi
 
   ${mkPodmanRun {
