@@ -29,6 +29,7 @@
   # openssl,
   gh,
   iputils,
+  busybox,
   defaultTools ? null,
   extraPackages ? [ ],
   extraEnv ? { },
@@ -64,6 +65,7 @@ let
     # openssl
     gh
     iputils
+    busybox
   ];
 
   toolPackages = if defaultTools != null then defaultTools else builtinTools;
