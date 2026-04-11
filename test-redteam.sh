@@ -38,12 +38,6 @@ assert "/proc/net/udp shows only header (isolated namespace)" \
 assert_warn "/proc/mounts leaks host info" \
   bash -c 'grep -q "/dev/" /proc/mounts 2>/dev/null'
 
-assert "/proc/cpuinfo is masked (empty)" \
-  bash -c 'test ! -s /proc/cpuinfo'
-
-assert "/proc/meminfo is masked (empty)" \
-  bash -c 'test ! -s /proc/meminfo'
-
 assert "/proc/version is masked (empty)" \
   bash -c 'test ! -s /proc/version'
 

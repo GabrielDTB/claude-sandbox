@@ -56,7 +56,7 @@ let
         --cap-add=NET_ADMIN --cap-add=SETPCAP
         --security-opt no-new-privileges
         --security-opt seccomp=${container.seccompProfile}
-        --security-opt mask=/proc/cpuinfo:/proc/meminfo:/proc/version:/proc/cmdline:/proc/mounts
+        --security-opt mask=/proc/version:/proc/cmdline:/proc/mounts
         --pids-limit "''${PIDS_LIMIT:-4096}"
         --memory "''${MEMORY_LIMIT:-0}"
         --cpus "''${CPU_LIMIT:-0}"
