@@ -150,45 +150,69 @@ in
 (writeShellScriptBin "claude-sandboxed" ''
   set -euo pipefail
 
+  usage() {
+    echo "Usage: claude-sandboxed <workspace> [options] [-- claude-args...]" >&2
+    echo "" >&2
+    echo "Options:" >&2
+    echo "  --devenv PATH     Inject dev environment from a devenv project" >&2
+    echo "  --flake PATH      Inject dev environment from a flake's devShell" >&2
+    echo "  --state-dir PATH  State directory (default: ./.claude-sandbox-state)" >&2
+    echo "  --anonymous       Suppress identity-leaking config (GH token)" >&2
+    echo "  --no-tools        Use minimal container image (no dev tools)" >&2
+    echo "  --permissive      Pass --dangerously-skip-permissions to claude" >&2
+    exit 1
+  }
+
   if ! command -v podman &>/dev/null; then
     echo "error: podman is required but not found" >&2
     echo "On NixOS, enable with: virtualisation.podman.enable = true;" >&2
     exit 1
   fi
 
-  # Parse sandbox flags; remaining args pass through to claude.
+  # First positional arg is the required workspace directory.
+  if [ $# -eq 0 ] || [[ "$1" == -* ]]; then
+    usage
+  fi
+  BOX_DIR="$(${container.coreutils}/bin/realpath "$1")"
+  shift
+  if [ ! -d "$BOX_DIR" ]; then
+    echo "error: workspace directory does not exist: $BOX_DIR" >&2; exit 1
+  fi
+
+  # Parse flags; remaining args after -- pass through to claude.
   ANONYMOUS=0
   NO_TOOLS=0
   PERMISSIVE=0
   DEV_ENV=0
+  DEV_ENV_TYPE=""
+  DEV_ENV_SOURCE=""
+  STATE_DIR=""
   PASSTHROUGH=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --anonymous)  ANONYMOUS=1; shift ;;
       --no-tools)   NO_TOOLS=1; shift ;;
       --permissive) PERMISSIVE=1; shift ;;
-      --dev-env)    DEV_ENV=1; DEV_ENV_SOURCE="$2"; shift 2 ;;
+      --devenv)     DEV_ENV=1; DEV_ENV_TYPE="devenv"; DEV_ENV_SOURCE="$2"; shift 2 ;;
+      --flake)      DEV_ENV=1; DEV_ENV_TYPE="flake"; DEV_ENV_SOURCE="$2"; shift 2 ;;
+      --state-dir)  STATE_DIR="$2"; shift 2 ;;
       --) shift; PASSTHROUGH+=("$@"); break ;;
       *)  PASSTHROUGH+=("$1"); shift ;;
     esac
   done
   set -- "''${PASSTHROUGH[@]}"
 
-  # Accept workspace path as first arg, env var, or default to $PWD
-  if [ $# -gt 0 ] && [ -d "$1" ]; then
-    SANDBOX_ROOT="$(${container.coreutils}/bin/realpath "$1")"
-    shift
-  else
-    SANDBOX_ROOT="$(${container.coreutils}/bin/realpath "''${CLAUDE_SANDBOX_PROJECT:-$PWD}")"
-  fi
-
-  BOX_DIR="$SANDBOX_ROOT/box"
-  SANDBOX_DIR="$SANDBOX_ROOT/.claude-sandbox"
-  PROJECT_NAME="$(${container.coreutils}/bin/basename "$SANDBOX_ROOT")"
+  SANDBOX_DIR="''${STATE_DIR:-./.claude-sandbox-state}"
+  ${container.coreutils}/bin/mkdir -p "$SANDBOX_DIR"
+  SANDBOX_DIR="$(${container.coreutils}/bin/realpath "$SANDBOX_DIR")"
+  PROJECT_NAME="$(${container.coreutils}/bin/basename "$BOX_DIR")"
   WORKSPACE="/workspace/$PROJECT_NAME"
   AUTH_PROXY_NAME="claude-auth-proxy-$$"
 
-  ${container.coreutils}/bin/mkdir -p "$BOX_DIR/.git" "$SANDBOX_DIR/claude" "$SANDBOX_DIR/box-git"
+  ${container.coreutils}/bin/mkdir -p "$SANDBOX_DIR/claude" "$SANDBOX_DIR/box-git"
+  if [ ! -d "$BOX_DIR/.git" ]; then
+    ${container.coreutils}/bin/mkdir -p "$BOX_DIR/.git"
+  fi
   if [ ! -s "$SANDBOX_DIR/claude.json" ]; then
     echo '{"hasCompletedOnboarding":true}' > "$SANDBOX_DIR/claude.json"
   fi
@@ -204,13 +228,9 @@ in
 
   # Runtime dev environment injection: capture a TRUSTED project's devShell
   # environment and mount its closure into the container.
-  # The source is the user's real project — never box/, which is untrusted.
   if [ "$DEV_ENV" = 1 ]; then
     if ! command -v nix &>/dev/null; then
-      echo "error: nix is required for --dev-env" >&2; exit 1
-    fi
-    if [ -z "''${DEV_ENV_SOURCE:-}" ]; then
-      echo "error: --dev-env requires a path to the trusted project" >&2; exit 1
+      echo "error: nix is required for --devenv/--flake" >&2; exit 1
     fi
 
     DEV_ENV_SOURCE="$(${container.coreutils}/bin/realpath "$DEV_ENV_SOURCE")"
@@ -218,23 +238,24 @@ in
     CLOSURE_CACHE="$SANDBOX_DIR/dev-closure-paths"
     SYSTEM="$(${container.coreutils}/bin/uname -m)-linux"
 
-    # Determine project type and lock file for cache invalidation.
-    DEV_ENV_TYPE=""
+    # Determine lock file for cache invalidation.
     LOCK_FILE=""
-    if [ -f "$DEV_ENV_SOURCE/flake.nix" ]; then
-      DEV_ENV_TYPE="flake"
+    if [ "$DEV_ENV_TYPE" = "flake" ]; then
+      if [ ! -f "$DEV_ENV_SOURCE/flake.nix" ]; then
+        echo "error: no flake.nix found in $DEV_ENV_SOURCE" >&2; exit 1
+      fi
       LOCK_FILE="$DEV_ENV_SOURCE/flake.lock"
-    elif [ -f "$DEV_ENV_SOURCE/devenv.yaml" ]; then
-      DEV_ENV_TYPE="devenv"
+    elif [ "$DEV_ENV_TYPE" = "devenv" ]; then
+      if [ ! -f "$DEV_ENV_SOURCE/devenv.yaml" ]; then
+        echo "error: no devenv.yaml found in $DEV_ENV_SOURCE" >&2; exit 1
+      fi
       if ! command -v devenv &>/dev/null; then
-        echo "error: devenv CLI is required for --dev-env with devenv projects" >&2; exit 1
+        echo "error: devenv CLI is required for --devenv" >&2; exit 1
       fi
       if [ ! -L "$DEV_ENV_SOURCE/.devenv/profile" ]; then
         echo "error: no .devenv/profile found — run 'devenv shell' in $DEV_ENV_SOURCE first" >&2; exit 1
       fi
       LOCK_FILE="$DEV_ENV_SOURCE/devenv.lock"
-    else
-      echo "error: no flake.nix or devenv.yaml found in $DEV_ENV_SOURCE" >&2; exit 1
     fi
 
     NEEDS_CAPTURE=0
@@ -319,7 +340,7 @@ STUBEOF
 
   # Start auth proxy container
   CREDS_FILE="$(${container.coreutils}/bin/realpath "''${CLAUDE_CREDENTIALS:-$HOME/.claude/.credentials.json}")"
-  AUTH_PROXY_LOG="$SANDBOX_ROOT/.auth-proxy.log"
+  AUTH_PROXY_LOG="$SANDBOX_DIR/auth-proxy.log"
   podman run --rm -d \
     --name "$AUTH_PROXY_NAME" \
     --read-only \
