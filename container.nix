@@ -5,6 +5,7 @@
   buildEnv,
   writeText,
   writeTextDir,
+  runCommand,
   claude-code,
   coreutils,
   bash,
@@ -32,6 +33,9 @@
   busybox,
   nftables,
   libcap,
+  glibc,
+  stdenv,
+  zlib,
   defaultTools ? null,
   extraPackages ? [ ],
   devShell ? null,
@@ -120,6 +124,14 @@ let
     else
       null;
 
+  # FHS shared libraries for dynamically linked binaries (pixi, mojo, etc.)
+  fhsLibs = runCommand "fhs-libs" {} ''
+    mkdir -p $out/lib
+    for lib in ${glibc}/lib/*.so* ${stdenv.cc.cc.lib}/lib/libstdc++.so* ${zlib}/lib/libz.so*; do
+      ln -sf "$lib" "$out/lib/"
+    done
+  '';
+
   allPackages = corePackages ++ toolPackages ++ extraPackages;
 
 
@@ -130,6 +142,7 @@ let
         name = "${name}-env";
         paths = packages ++ [
           ncurses
+          fhsLibs
           dockerTools.caCertificates
         ];
         pathsToLink = [
@@ -139,7 +152,7 @@ let
           "/share"
           "/etc"
         ];
-        ignoreCollisions = devShell != null;
+        ignoreCollisions = true;
       };
     in
     dockerTools.buildLayeredImage {
@@ -157,7 +170,9 @@ let
                 # Standard FHS symlinks so tools find things at expected paths.
                 ln -s ../bin ./usr/bin
                 ln -s ../lib ./usr/lib
-                ln -s ../lib64 ./usr/lib64
+                rm -rf ./lib64
+                ln -s lib ./lib64
+                ln -s ../lib ./usr/lib64
                 rm -rf ./sbin
                 ln -s bin ./sbin
                 ln -s ../bin ./usr/sbin
@@ -166,6 +181,11 @@ let
                 cat > ./etc/nsswitch.conf <<'EOF'
         hosts: files dns
         EOF
+
+                # ldconfig cache so the dynamic linker can find shared libraries.
+                echo "/lib" > ./etc/ld.so.conf
+                mkdir -p ./etc
+                ${glibc.bin}/bin/ldconfig -f ./etc/ld.so.conf -C ./etc/ld.so.cache -r .
 
                 echo 'user:x:1000:1000:user:/home/user:/bin/bash' > ./etc/passwd
                 echo 'user:x:1000:' > ./etc/group
