@@ -57,9 +57,9 @@ let
         --security-opt no-new-privileges
         --security-opt seccomp=${container.seccompProfile}
         --security-opt mask=/proc/cpuinfo:/proc/meminfo:/proc/version:/proc/cmdline:/proc/mounts
-        --pids-limit 4096
-        --memory 8g
-        --cpus 4
+        --pids-limit "''${PIDS_LIMIT:-4096}"
+        --memory "''${MEMORY_LIMIT:-0}"
+        --cpus "''${CPU_LIMIT:-0}"
         -v "$BOX_DIR:$WORKSPACE"
         -v "$SANDBOX_DIR/box-git:$WORKSPACE/.git:rw"
         -v "$SANDBOX_DIR/claude:/home/user/.claude:rw"
@@ -134,6 +134,8 @@ let
     SANDBOX_IMAGE="claude-sandbox:latest"
     ANONYMOUS=0
     DEV_ENV=0
+    CPU_LIMIT=""
+    MEMORY_LIMIT=""
     EXTRA_BINDS=()
     EXTRA_ENVS=()
 
@@ -198,6 +200,8 @@ in
     echo "  --bind SRC:DST    Bind mount SRC into container at DST (read-only)" >&2
     echo "  --bind-rw SRC:DST Bind mount SRC into container at DST (read-write)" >&2
     echo "  --env KEY=VALUE   Set environment variable in the container" >&2
+    echo "  --cpus N          CPU limit (default: unlimited)" >&2
+    echo "  --memory N        Memory limit, e.g. 16g (default: unlimited)" >&2
     echo "  --anonymous       Suppress identity-leaking config (GH token)" >&2
     echo "  --no-tools        Use minimal container image (no dev tools)" >&2
     echo "  --permissive      Pass --dangerously-skip-permissions to claude" >&2
@@ -228,6 +232,8 @@ in
   DEV_ENV_TYPE=""
   DEV_ENV_SOURCE=""
   STATE_DIR=""
+  CPU_LIMIT=""
+  MEMORY_LIMIT=""
   EXTRA_BINDS=()
   EXTRA_ENVS=()
   PASSTHROUGH=()
@@ -250,6 +256,8 @@ in
       --bind)       EXTRA_BINDS+=("$2:ro"); shift 2 ;;
       --bind-rw)    EXTRA_BINDS+=("$2"); shift 2 ;;
       --env)        EXTRA_ENVS+=("$2"); shift 2 ;;
+      --cpus)       CPU_LIMIT="$2"; shift 2 ;;
+      --memory)     MEMORY_LIMIT="$2"; shift 2 ;;
       --) shift; PASSTHROUGH+=("$@"); break ;;
       *)  PASSTHROUGH+=("$1"); shift ;;
     esac
