@@ -311,15 +311,26 @@ in
       LOCK_FILE="$DEV_ENV_SOURCE/devenv.lock"
     fi
 
+    # Build a composite hash of everything that can change the dev environment.
+    HASH_INPUT=""
+    if [ -n "$LOCK_FILE" ] && [ -f "$LOCK_FILE" ]; then
+      HASH_INPUT+="$(${container.coreutils}/bin/sha256sum "$LOCK_FILE" | ${container.coreutils}/bin/cut -d' ' -f1)"
+    fi
+    if [ "$DEV_ENV_TYPE" = "devenv" ] && [ -L "$DEV_ENV_SOURCE/.devenv/profile" ]; then
+      # Profile symlink target changes when devenv rebuilds (e.g. new package).
+      HASH_INPUT+="$(${container.coreutils}/bin/readlink -f "$DEV_ENV_SOURCE/.devenv/profile")"
+    fi
+    if [ "$DEV_ENV_TYPE" = "flake" ] && [ -f "$DEV_ENV_SOURCE/flake.nix" ]; then
+      HASH_INPUT+="$(${container.coreutils}/bin/sha256sum "$DEV_ENV_SOURCE/flake.nix" | ${container.coreutils}/bin/cut -d' ' -f1)"
+    fi
+    CURRENT_HASH=$(echo -n "$HASH_INPUT" | ${container.coreutils}/bin/sha256sum | ${container.coreutils}/bin/cut -d' ' -f1)
+    CACHED_HASH=$(${container.coreutils}/bin/cat "$SANDBOX_DIR/dev-env.hash" 2>/dev/null || echo "")
+
     NEEDS_CAPTURE=0
     if [ ! -f "$DEV_ENV_CACHE" ] || [ ! -f "$CLOSURE_CACHE" ]; then
       NEEDS_CAPTURE=1
-    elif [ -n "$LOCK_FILE" ] && [ -f "$LOCK_FILE" ]; then
-      LOCK_HASH=$(${container.coreutils}/bin/sha256sum "$LOCK_FILE" | ${container.coreutils}/bin/cut -d' ' -f1)
-      CACHED_HASH=$(${container.coreutils}/bin/cat "$SANDBOX_DIR/dev-env.hash" 2>/dev/null || echo "")
-      if [ "$LOCK_HASH" != "$CACHED_HASH" ]; then
-        NEEDS_CAPTURE=1
-      fi
+    elif [ "$CURRENT_HASH" != "$CACHED_HASH" ]; then
+      NEEDS_CAPTURE=1
     fi
 
     if [ "$NEEDS_CAPTURE" = 1 ]; then
@@ -359,10 +370,7 @@ in
         nix path-info -r "$PROFILE" | ${container.coreutils}/bin/sort -u > "$CLOSURE_CACHE"
       fi
 
-      if [ -n "$LOCK_FILE" ] && [ -f "$LOCK_FILE" ]; then
-        ${container.coreutils}/bin/sha256sum "$LOCK_FILE" \
-          | ${container.coreutils}/bin/cut -d' ' -f1 > "$SANDBOX_DIR/dev-env.hash"
-      fi
+      echo -n "$CURRENT_HASH" > "$SANDBOX_DIR/dev-env.hash"
       echo "Dev environment captured ($(${container.coreutils}/bin/wc -l < "$CLOSURE_CACHE") store paths)." >&2
     fi
 
