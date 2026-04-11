@@ -165,7 +165,7 @@ in
       --anonymous)  ANONYMOUS=1; shift ;;
       --no-tools)   NO_TOOLS=1; shift ;;
       --permissive) PERMISSIVE=1; shift ;;
-      --dev-env)    DEV_ENV=1; shift ;;
+      --dev-env)    DEV_ENV=1; DEV_ENV_SOURCE="$2"; shift 2 ;;
       --) shift; PASSTHROUGH+=("$@"); break ;;
       *)  PASSTHROUGH+=("$1"); shift ;;
     esac
@@ -200,62 +200,98 @@ in
   fi
   ${loadImage { image = container.proxyImage; marker = "proxy-loaded"; }}
 
-  # Runtime dev environment injection: capture the project's devShell environment
-  # and mount its closure into the container.
+  # Runtime dev environment injection: capture a TRUSTED project's devShell
+  # environment and mount its closure into the container.
+  # The source is the user's real project — never box/, which is untrusted.
   if [ "$DEV_ENV" = 1 ]; then
     if ! command -v nix &>/dev/null; then
       echo "error: nix is required for --dev-env" >&2; exit 1
     fi
+    if [ -z "''${DEV_ENV_SOURCE:-}" ]; then
+      echo "error: --dev-env requires a path to the trusted project" >&2; exit 1
+    fi
 
+    DEV_ENV_SOURCE="$(${container.coreutils}/bin/realpath "$DEV_ENV_SOURCE")"
     DEV_ENV_CACHE="$SANDBOX_DIR/dev-env.sh"
     CLOSURE_CACHE="$SANDBOX_DIR/dev-closure-paths"
     SYSTEM="$(${container.coreutils}/bin/uname -m)-linux"
 
-    # Determine the nix target and lock file for cache invalidation.
-    DEV_ENV_TARGET=""
+    # Determine project type and lock file for cache invalidation.
+    DEV_ENV_TYPE=""
     LOCK_FILE=""
-    if [ -f "$BOX_DIR/flake.nix" ]; then
-      DEV_ENV_TARGET="path:$BOX_DIR"
-      LOCK_FILE="$BOX_DIR/flake.lock"
-    elif [ -f "$BOX_DIR/.devenv/flake.nix" ]; then
-      DEV_ENV_TARGET="path:$BOX_DIR/.devenv"
-      LOCK_FILE="$BOX_DIR/devenv.lock"
+    if [ -f "$DEV_ENV_SOURCE/flake.nix" ]; then
+      DEV_ENV_TYPE="flake"
+      LOCK_FILE="$DEV_ENV_SOURCE/flake.lock"
+    elif [ -f "$DEV_ENV_SOURCE/devenv.yaml" ]; then
+      DEV_ENV_TYPE="devenv"
+      if ! command -v devenv &>/dev/null; then
+        echo "error: devenv CLI is required for --dev-env with devenv projects" >&2; exit 1
+      fi
+      if [ ! -L "$DEV_ENV_SOURCE/.devenv/profile" ]; then
+        echo "error: no .devenv/profile found — run 'devenv shell' in $DEV_ENV_SOURCE first" >&2; exit 1
+      fi
+      LOCK_FILE="$DEV_ENV_SOURCE/devenv.lock"
+    else
+      echo "error: no flake.nix or devenv.yaml found in $DEV_ENV_SOURCE" >&2; exit 1
     fi
 
-    if [ -z "$DEV_ENV_TARGET" ]; then
-      echo "warning: --dev-env specified but no flake.nix or devenv found in $BOX_DIR" >&2
-      DEV_ENV=0
-    else
-      NEEDS_CAPTURE=0
-      if [ ! -f "$DEV_ENV_CACHE" ] || [ ! -f "$CLOSURE_CACHE" ]; then
+    NEEDS_CAPTURE=0
+    if [ ! -f "$DEV_ENV_CACHE" ] || [ ! -f "$CLOSURE_CACHE" ]; then
+      NEEDS_CAPTURE=1
+    elif [ -n "$LOCK_FILE" ] && [ -f "$LOCK_FILE" ]; then
+      LOCK_HASH=$(${container.coreutils}/bin/sha256sum "$LOCK_FILE" | ${container.coreutils}/bin/cut -d' ' -f1)
+      CACHED_HASH=$(${container.coreutils}/bin/cat "$SANDBOX_DIR/dev-env.hash" 2>/dev/null || echo "")
+      if [ "$LOCK_HASH" != "$CACHED_HASH" ]; then
         NEEDS_CAPTURE=1
-      elif [ -n "$LOCK_FILE" ] && [ -f "$LOCK_FILE" ]; then
-        LOCK_HASH=$(${container.coreutils}/bin/sha256sum "$LOCK_FILE" | ${container.coreutils}/bin/cut -d' ' -f1)
-        CACHED_HASH=$(${container.coreutils}/bin/cat "$SANDBOX_DIR/dev-env.hash" 2>/dev/null || echo "")
-        if [ "$LOCK_HASH" != "$CACHED_HASH" ]; then
-          NEEDS_CAPTURE=1
-        fi
       fi
+    fi
 
-      if [ "$NEEDS_CAPTURE" = 1 ]; then
-        echo "Capturing dev environment..." >&2
-        nix print-dev-env "$DEV_ENV_TARGET" > "$DEV_ENV_CACHE"
+    if [ "$NEEDS_CAPTURE" = 1 ]; then
+      echo "Capturing dev environment from $DEV_ENV_SOURCE ..." >&2
 
-        # Build the devShell and compute its closure — only these store paths
-        # are mounted into the container, not the entire host nix store.
-        DEV_SHELL_OUT=$(nix build "$DEV_ENV_TARGET#devShells.$SYSTEM.default" \
+      if [ "$DEV_ENV_TYPE" = "flake" ]; then
+        nix print-dev-env "path:$DEV_ENV_SOURCE" > "$DEV_ENV_CACHE"
+        DEV_SHELL_OUT=$(nix build "path:$DEV_ENV_SOURCE#devShells.$SYSTEM.default" \
           --no-link --print-out-paths 2>/dev/null)
         nix path-info -r "$DEV_SHELL_OUT" | ${container.coreutils}/bin/sort -u > "$CLOSURE_CACHE"
 
-        if [ -n "$LOCK_FILE" ] && [ -f "$LOCK_FILE" ]; then
-          ${container.coreutils}/bin/sha256sum "$LOCK_FILE" \
-            | ${container.coreutils}/bin/cut -d' ' -f1 > "$SANDBOX_DIR/dev-env.hash"
-        fi
-        echo "Dev environment captured ($(${container.coreutils}/bin/wc -l < "$CLOSURE_CACHE") store paths)." >&2
+      elif [ "$DEV_ENV_TYPE" = "devenv" ]; then
+        # devenv's generated flake uses non-standard nix that only the devenv
+        # CLI can evaluate. Run devenv shell from a clean env (env -i) so we
+        # capture what devenv actually contributes rather than the host env.
+        # Write to a temp file to avoid $() hanging on open fds.
+        DEVENV_ENV_TMP="$(${container.coreutils}/bin/mktemp)"
+        DEVENV_BIN="$(command -v devenv)"
+        NIX_BIN="$(command -v nix)"
+        env -i \
+          HOME="$HOME" USER="$USER" \
+          PATH="$(${container.coreutils}/bin/dirname "$DEVENV_BIN"):$(${container.coreutils}/bin/dirname "$NIX_BIN"):/run/current-system/sw/bin" \
+          NIX_SSL_CERT_FILE="''${NIX_SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}" \
+          LOCALE_ARCHIVE="''${LOCALE_ARCHIVE:-/run/current-system/sw/lib/locale/locale-archive}" \
+          ${container.bash}/bin/bash -c \
+            'cd "$1" && devenv shell ${container.bash}/bin/bash --norc --noprofile -c "export -p > \"$2\""' \
+            _ "$DEV_ENV_SOURCE" "$DEVENV_ENV_TMP" 2>/dev/null
+
+        # Filter out vars the container manages or that are host-specific.
+        ${container.gnugrep}/bin/grep -v -E \
+          '^declare -x (HOME|USER|TMPDIR|SHELL|SHLVL|PWD|OLDPWD|_|LOGNAME|HOSTNAME)=' \
+          "$DEVENV_ENV_TMP" > "$DEV_ENV_CACHE" || true
+        ${container.coreutils}/bin/rm -f "$DEVENV_ENV_TMP"
+
+        # Closure from the already-built devenv profile.
+        PROFILE="$(${container.coreutils}/bin/readlink -f "$DEV_ENV_SOURCE/.devenv/profile")"
+        nix path-info -r "$PROFILE" | ${container.coreutils}/bin/sort -u > "$CLOSURE_CACHE"
       fi
 
-      # Write runtime entrypoint that sources the dev env before exec.
-      ${container.coreutils}/bin/cat > "$SANDBOX_DIR/dev-entrypoint.sh" << 'DEVEOF'
+      if [ -n "$LOCK_FILE" ] && [ -f "$LOCK_FILE" ]; then
+        ${container.coreutils}/bin/sha256sum "$LOCK_FILE" \
+          | ${container.coreutils}/bin/cut -d' ' -f1 > "$SANDBOX_DIR/dev-env.hash"
+      fi
+      echo "Dev environment captured ($(${container.coreutils}/bin/wc -l < "$CLOSURE_CACHE") store paths)." >&2
+    fi
+
+    # Write runtime entrypoint that sources the dev env before exec.
+    ${container.coreutils}/bin/cat > "$SANDBOX_DIR/dev-entrypoint.sh" << 'DEVEOF'
 #!/bin/bash
 BASE_PATH="$PATH"
 source /dev-env.sh
@@ -265,7 +301,6 @@ export USER=user
 export TMPDIR=/tmp
 exec "$@"
 DEVEOF
-    fi
   fi
 
   # Stub credentials — Claude Code sees "logged in" and makes API calls through

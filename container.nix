@@ -289,5 +289,7 @@ in
     claude-code
     ncurses
     gnugrep
+    gnused
+    diffutils
     ;
 }
