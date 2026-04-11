@@ -97,6 +97,10 @@ let
         PODMAN_ARGS+=(-e "$evar")
       done
 
+      if [ "''${GPU:-0}" = 1 ]; then
+        PODMAN_ARGS+=(--device nvidia.com/gpu=all)
+      fi
+
       if [ "''${DEV_ENV:-0}" = 1 ] && [ -f "$SANDBOX_DIR/dev-closure-paths" ]; then
         PODMAN_ARGS+=(-v "$SANDBOX_DIR/dev-env.sh:/dev-env.sh:ro")
         PODMAN_ARGS+=(-v "$SANDBOX_DIR/dev-entrypoint.sh:/dev-entrypoint.sh:ro")
@@ -202,6 +206,7 @@ in
     echo "  --env KEY=VALUE   Set environment variable in the container" >&2
     echo "  --cpus N          CPU limit (default: unlimited)" >&2
     echo "  --memory N        Memory limit, e.g. 16g (default: unlimited)" >&2
+    echo "  --gpu             Pass through GPU devices (requires nvidia-container-toolkit)" >&2
     echo "  --anonymous       Suppress identity-leaking config (GH token)" >&2
     echo "  --no-tools        Use minimal container image (no dev tools)" >&2
     echo "  --permissive      Pass --dangerously-skip-permissions to claude" >&2
@@ -234,6 +239,7 @@ in
   STATE_DIR=""
   CPU_LIMIT=""
   MEMORY_LIMIT=""
+  GPU=0
   EXTRA_BINDS=()
   EXTRA_ENVS=()
   PASSTHROUGH=()
@@ -258,6 +264,7 @@ in
       --env)        EXTRA_ENVS+=("$2"); shift 2 ;;
       --cpus)       CPU_LIMIT="$2"; shift 2 ;;
       --memory)     MEMORY_LIMIT="$2"; shift 2 ;;
+      --gpu)        GPU=1; shift ;;
       --) shift; PASSTHROUGH+=("$@"); break ;;
       *)  PASSTHROUGH+=("$1"); shift ;;
     esac
