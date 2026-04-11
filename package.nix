@@ -132,17 +132,57 @@ let
     SANDBOX_DIR="$(${container.coreutils}/bin/mktemp -d)"
     ${container.coreutils}/bin/mkdir -p "$SANDBOX_DIR/claude" "$SANDBOX_DIR/box-git"
     trap '${container.coreutils}/bin/rm -rf "$BOX_DIR" "$SANDBOX_DIR"' EXIT
-    PROJECT_NAME="test-project"
-    WORKSPACE="/workspace/$PROJECT_NAME"
+    WORKSPACE="/workspace"
     PROXY_HOST_PORT=0
     TTY_FLAG=()
     SANDBOX_IMAGE="claude-sandbox:latest"
     ANONYMOUS=0
+    DEV_ENV=0
+
+    # Create firewall script so tests run with nftables LAN isolation active.
+    ${container.coreutils}/bin/cat > "$SANDBOX_DIR/setup-firewall.sh" << 'FWEOF'
+#!/bin/bash
+set -e
+nft add table inet sandbox
+nft add chain inet sandbox output '{ type filter hook output priority 0; }'
+nft add rule inet sandbox output oif lo accept
+nft add rule inet sandbox output ip daddr 10.0.0.0/8 reject
+nft add rule inet sandbox output ip daddr 172.16.0.0/12 reject
+nft add rule inet sandbox output ip daddr 192.168.0.0/16 reject
+nft add rule inet sandbox output ip daddr 100.64.0.0/10 reject
+nft add rule inet sandbox output ip daddr 169.254.0.0/16 reject
+nft add rule inet sandbox output ip6 daddr fc00::/7 reject
+nft add rule inet sandbox output ip6 daddr fe80::/10 reject
+nft add rule inet sandbox output accept
+python3 -c '
+import ctypes, os, sys
+libc = ctypes.CDLL(None)
+# Drop CAP_NET_ADMIN(12) and CAP_SETPCAP(8) from bounding set
+for cap in (12, 8):
+    libc.prctl(24, cap)  # PR_CAPBSET_DROP
+# Clear all ambient caps
+libc.prctl(47, 4, 0, 0, 0)  # PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL
+# Drop from effective/permitted/inheritable via capset syscall
+class CapHeader(ctypes.Structure):
+    _fields_ = [("version", ctypes.c_uint32), ("pid", ctypes.c_int)]
+class CapData(ctypes.Structure):
+    _fields_ = [("effective", ctypes.c_uint32), ("permitted", ctypes.c_uint32), ("inheritable", ctypes.c_uint32)]
+hdr = CapHeader(0x20080522, 0)
+data = (CapData * 2)()
+libc.syscall(125, ctypes.byref(hdr), ctypes.byref(data))  # capget
+mask = ~((1 << 12) | (1 << 8))
+data[0].effective &= mask
+data[0].permitted &= mask
+data[0].inheritable &= mask
+libc.syscall(126, ctypes.byref(hdr), ctypes.byref(data))  # capset
+os.execvp(sys.argv[1], sys.argv[1:])
+' "$@"
+FWEOF
 
     ${loadImage { image = container.image; marker = "loaded"; }}
 
     ${mkPodmanRun {
-      command = "env TEST_LIB=${testLib} ${container.bash}/bin/bash ${script}";
+      command = "${container.bash}/bin/bash /setup-firewall.sh env TEST_LIB=${testLib} ${container.bash}/bin/bash ${script}";
       extraVols = [ "${script}" "${testLib}" ];
     }}
   '';
@@ -205,8 +245,7 @@ in
   SANDBOX_DIR="''${STATE_DIR:-./.claude-sandbox-state}"
   ${container.coreutils}/bin/mkdir -p "$SANDBOX_DIR"
   SANDBOX_DIR="$(${container.coreutils}/bin/realpath "$SANDBOX_DIR")"
-  PROJECT_NAME="$(${container.coreutils}/bin/basename "$BOX_DIR")"
-  WORKSPACE="/workspace/$PROJECT_NAME"
+  WORKSPACE="/workspace"
   AUTH_PROXY_NAME="claude-auth-proxy-$$"
 
   ${container.coreutils}/bin/mkdir -p "$SANDBOX_DIR/claude" "$SANDBOX_DIR/box-git"
@@ -393,7 +432,29 @@ nft add rule inet sandbox output ip daddr 169.254.0.0/16 reject
 nft add rule inet sandbox output ip6 daddr fc00::/7 reject
 nft add rule inet sandbox output ip6 daddr fe80::/10 reject
 nft add rule inet sandbox output accept
-exec capsh --drop=cap_net_admin,cap_setpcap -- -c 'exec "$@"' _ "$@"
+python3 -c '
+import ctypes, os, sys
+libc = ctypes.CDLL(None)
+# Drop CAP_NET_ADMIN(12) and CAP_SETPCAP(8) from bounding set
+for cap in (12, 8):
+    libc.prctl(24, cap)  # PR_CAPBSET_DROP
+# Clear all ambient caps
+libc.prctl(47, 4, 0, 0, 0)  # PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL
+# Drop from effective/permitted/inheritable via capset syscall
+class CapHeader(ctypes.Structure):
+    _fields_ = [("version", ctypes.c_uint32), ("pid", ctypes.c_int)]
+class CapData(ctypes.Structure):
+    _fields_ = [("effective", ctypes.c_uint32), ("permitted", ctypes.c_uint32), ("inheritable", ctypes.c_uint32)]
+hdr = CapHeader(0x20080522, 0)
+data = (CapData * 2)()
+libc.syscall(125, ctypes.byref(hdr), ctypes.byref(data))  # capget
+mask = ~((1 << 12) | (1 << 8))
+data[0].effective &= mask
+data[0].permitted &= mask
+data[0].inheritable &= mask
+libc.syscall(126, ctypes.byref(hdr), ctypes.byref(data))  # capset
+os.execvp(sys.argv[1], sys.argv[1:])
+' "$@"
 FWEOF
 
   CLAUDE_CMD=(${container.claude-code}/bin/claude)

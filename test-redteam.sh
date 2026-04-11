@@ -65,19 +65,49 @@ assert "no excessive fd leaks (< 20 open fds)" \
   test "$FD_COUNT" -lt 20
 
 echo ""
-echo "=== Network access ==="
+echo "=== Network: LAN isolation ==="
 
 assert "public internet is reachable (by design)" \
   bash -c 'timeout 3 bash -c "echo > /dev/tcp/1.1.1.1/53" 2>/dev/null'
 
+assert_fails "cannot reach RFC1918 10.0.0.0/8" \
+  bash -c 'timeout 2 bash -c "echo > /dev/tcp/10.0.0.1/80" 2>/dev/null'
+
+assert_fails "cannot reach RFC1918 172.16.0.0/12" \
+  bash -c 'timeout 2 bash -c "echo > /dev/tcp/172.16.0.1/80" 2>/dev/null'
+
+assert_fails "cannot reach RFC1918 192.168.0.0/16" \
+  bash -c 'timeout 2 bash -c "echo > /dev/tcp/192.168.1.1/80" 2>/dev/null'
+
+assert_fails "cannot reach CGNAT/Tailscale 100.64.0.0/10" \
+  bash -c 'timeout 2 bash -c "echo > /dev/tcp/100.100.100.100/80" 2>/dev/null'
+
 assert_fails "cannot reach cloud metadata (169.254.169.254)" \
   bash -c 'timeout 2 bash -c "echo > /dev/tcp/169.254.169.254/80" 2>/dev/null'
+
+assert_fails "cannot reach host via host.containers.internal (169.254.1.2)" \
+  bash -c 'timeout 2 bash -c "echo > /dev/tcp/169.254.1.2/22" 2>/dev/null'
 
 assert_fails "cannot reach localhost services" \
   bash -c 'timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/22" 2>/dev/null'
 
-assert_fails "cannot reach host via host.containers.internal (169.254.1.2)" \
-  bash -c 'timeout 2 bash -c "echo > /dev/tcp/169.254.1.2/22" 2>/dev/null'
+echo ""
+echo "=== Network: firewall evasion ==="
+
+assert_fails "cannot flush nftables ruleset" \
+  bash -c 'nft flush ruleset 2>&1'
+
+assert_fails "cannot delete nftables table" \
+  bash -c 'nft delete table inet sandbox 2>&1'
+
+assert_fails "cannot add permissive nftables rule" \
+  bash -c 'nft add rule inet sandbox output accept 2>&1'
+
+assert_fails "cannot insert rule before block rules" \
+  bash -c 'nft insert rule inet sandbox output ip daddr 10.0.0.0/8 accept 2>&1'
+
+assert_fails "cannot re-acquire NET_ADMIN (no-new-privileges)" \
+  bash -c 'capsh --has-p=cap_net_admin 2>&1'
 
 echo ""
 echo "=== Filesystem attack surface ==="
@@ -131,8 +161,8 @@ assert "memory limit is set" \
 echo ""
 echo "=== Seccomp filter ==="
 
-assert_fails "cannot create symlinks" \
-  ln -s /etc/hosts symlink-test
+assert_fails "cannot create device nodes (mknod)" \
+  bash -c 'mknod /tmp/devnode-test c 1 3'
 
 assert_fails "cannot call mount" \
   bash -c 'mount -t tmpfs none /tmp 2>&1'

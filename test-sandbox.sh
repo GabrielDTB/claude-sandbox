@@ -106,8 +106,8 @@ fi
 echo ""
 echo "=== Seccomp filter ==="
 
-assert_fails "cannot create symlinks" \
-  ln -s /etc/hosts symlink-test
+assert_fails "cannot create device nodes (mknod)" \
+  bash -c 'mknod /tmp/devnode-test c 1 3'
 
 assert_fails "cannot call mount" \
   bash -c 'mount -t tmpfs none /tmp 2>&1'
@@ -121,8 +121,29 @@ assert "process spawning still works" \
 echo ""
 echo "=== Network isolation ==="
 
-assert_fails "cannot reach localhost" \
-  bash -c 'timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/22" 2>/dev/null'
+assert_fails "cannot reach RFC1918 10.0.0.0/8" \
+  bash -c 'timeout 2 bash -c "echo > /dev/tcp/10.0.0.1/80" 2>/dev/null'
+
+assert_fails "cannot reach RFC1918 172.16.0.0/12" \
+  bash -c 'timeout 2 bash -c "echo > /dev/tcp/172.16.0.1/80" 2>/dev/null'
+
+assert_fails "cannot reach RFC1918 192.168.0.0/16" \
+  bash -c 'timeout 2 bash -c "echo > /dev/tcp/192.168.1.1/80" 2>/dev/null'
+
+assert_fails "cannot reach CGNAT/Tailscale 100.64.0.0/10" \
+  bash -c 'timeout 2 bash -c "echo > /dev/tcp/100.100.100.100/80" 2>/dev/null'
+
+assert_fails "cannot reach link-local 169.254.0.0/16" \
+  bash -c 'timeout 2 bash -c "echo > /dev/tcp/169.254.169.254/80" 2>/dev/null'
+
+echo ""
+echo "=== Firewall persistence ==="
+
+assert_fails "cannot modify nftables rules (caps dropped)" \
+  bash -c 'nft add rule inet sandbox output accept 2>&1'
+
+assert_fails "cannot flush nftables rules (caps dropped)" \
+  bash -c 'nft flush ruleset 2>&1'
 
 echo ""
 echo "=== Resource limits ==="
