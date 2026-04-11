@@ -65,6 +65,7 @@ let
         --network "pasta:--no-map-gw,--map-guest-addr,none,-T,${authProxyPort}:$PROXY_HOST_PORT"
         --dns 1.1.1.1 --dns 1.0.0.1 --dns 8.8.8.8
         --dns-search .
+        --cap-add=NET_ADMIN --cap-add=SETPCAP
         --security-opt no-new-privileges
         --security-opt seccomp=${container.seccompProfile}
         --security-opt mask=/proc/cpuinfo:/proc/meminfo:/proc/version:/proc/cmdline:/proc/mounts
@@ -74,6 +75,7 @@ let
         -v "$BOX_DIR:$WORKSPACE"
         -v "$SANDBOX_DIR/box-git:$WORKSPACE/.git:rw"
         -v "$SANDBOX_DIR/claude:/home/user/.claude:rw"
+        -v "$SANDBOX_DIR/setup-firewall.sh:/setup-firewall.sh:ro"
         -e "ANTHROPIC_BASE_URL=http://127.0.0.1:${authProxyPort}"
         -e "TERM=''${TERM:-xterm-256color}"
         -e "COLORTERM=''${COLORTERM:-truecolor}"
@@ -354,6 +356,25 @@ STUBEOF
     TTY_FLAG=(-i)
   fi
 
+  # Write LAN firewall script. Sets nftables rules blocking RFC1918/link-local
+  # ranges, then drops NET_ADMIN+SETPCAP so the agent cannot undo them.
+  ${container.coreutils}/bin/cat > "$SANDBOX_DIR/setup-firewall.sh" << 'FWEOF'
+#!/bin/bash
+set -e
+nft add table inet sandbox
+nft add chain inet sandbox output '{ type filter hook output priority 0; }'
+nft add rule inet sandbox output oif lo accept
+nft add rule inet sandbox output ip daddr 10.0.0.0/8 reject
+nft add rule inet sandbox output ip daddr 172.16.0.0/12 reject
+nft add rule inet sandbox output ip daddr 192.168.0.0/16 reject
+nft add rule inet sandbox output ip daddr 100.64.0.0/10 reject
+nft add rule inet sandbox output ip daddr 169.254.0.0/16 reject
+nft add rule inet sandbox output ip6 daddr fc00::/7 reject
+nft add rule inet sandbox output ip6 daddr fe80::/10 reject
+nft add rule inet sandbox output accept
+exec capsh --drop=cap_net_admin,cap_setpcap -- -c 'exec "$@"' _ "$@"
+FWEOF
+
   CLAUDE_CMD=(${container.claude-code}/bin/claude)
   if [ "$PERMISSIVE" = 1 ]; then
     CLAUDE_CMD+=(--dangerously-skip-permissions)
@@ -361,6 +382,7 @@ STUBEOF
   if [ "$DEV_ENV" = 1 ]; then
     CLAUDE_CMD=("${container.bash}/bin/bash" "/dev-entrypoint.sh" "''${CLAUDE_CMD[@]}")
   fi
+  CLAUDE_CMD=("${container.bash}/bin/bash" "/setup-firewall.sh" "''${CLAUDE_CMD[@]}")
 
   ${mkPodmanRun {
     command = ''"''${CLAUDE_CMD[@]}" "$@"'';

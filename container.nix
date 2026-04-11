@@ -30,6 +30,8 @@
   gh,
   iputils,
   busybox,
+  nftables,
+  libcap,
   defaultTools ? null,
   extraPackages ? [ ],
   extraEnv ? { },
@@ -47,6 +49,8 @@ let
     gnugrep
     gnused
     diffutils
+    nftables
+    libcap
   ];
 
   # Development and utility tools included by default.
@@ -291,5 +295,7 @@ in
     gnugrep
     gnused
     diffutils
+    nftables
+    libcap
     ;
 }
