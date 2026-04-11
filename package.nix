@@ -3,13 +3,11 @@
   writeShellScriptBin,
   callPackage,
   extraPackages ? [ ],
-  extraBinds ? [ ],
-  extraEnv ? { },
   defaultTools ? null,
   devShell ? null,
 }:
 let
-  container = callPackage ./container.nix { inherit extraPackages extraEnv defaultTools devShell; };
+  container = callPackage ./container.nix { inherit extraPackages defaultTools devShell; };
 
   testLib = ./test-lib.sh;
   testScript = ./test-sandbox.sh;
@@ -19,16 +17,6 @@ let
   # pasta forwarding; the proxy listens on this port inside its container.
   # The host-side port is assigned dynamically to allow multiple sandboxes.
   authProxyPort = "18080";
-
-  extraBindFlags = builtins.concatStringsSep "\n  " (
-    map (
-      b:
-      if b.writable or false then
-        ''PODMAN_ARGS+=(-v "$BOX_DIR/${b.src}:${b.dst}")''
-      else
-        ''PODMAN_ARGS+=(-v "$BOX_DIR/${b.src}:${b.dst}:ro")''
-    ) extraBinds
-  );
 
   # Runs the sandbox container.
   #
@@ -99,7 +87,15 @@ let
         fi
       fi
 
-      ${extraBindFlags}
+      # Runtime extra bind mounts.
+      for bind in "''${EXTRA_BINDS[@]}"; do
+        PODMAN_ARGS+=(-v "$bind")
+      done
+
+      # Runtime extra environment variables.
+      for evar in "''${EXTRA_ENVS[@]}"; do
+        PODMAN_ARGS+=(-e "$evar")
+      done
 
       if [ "''${DEV_ENV:-0}" = 1 ] && [ -f "$SANDBOX_DIR/dev-closure-paths" ]; then
         PODMAN_ARGS+=(-v "$SANDBOX_DIR/dev-env.sh:/dev-env.sh:ro")
@@ -138,6 +134,8 @@ let
     SANDBOX_IMAGE="claude-sandbox:latest"
     ANONYMOUS=0
     DEV_ENV=0
+    EXTRA_BINDS=()
+    EXTRA_ENVS=()
 
     # Create firewall script so tests run with nftables LAN isolation active.
     ${container.coreutils}/bin/cat > "$SANDBOX_DIR/setup-firewall.sh" << 'FWEOF'
@@ -197,6 +195,9 @@ in
     echo "  --devenv PATH     Inject dev environment from a devenv project" >&2
     echo "  --flake PATH      Inject dev environment from a flake's devShell" >&2
     echo "  --state-dir PATH  State directory (default: ./.claude-sandbox-state)" >&2
+    echo "  --bind SRC:DST    Bind mount SRC into container at DST (read-only)" >&2
+    echo "  --bind-rw SRC:DST Bind mount SRC into container at DST (read-write)" >&2
+    echo "  --env KEY=VALUE   Set environment variable in the container" >&2
     echo "  --anonymous       Suppress identity-leaking config (GH token)" >&2
     echo "  --no-tools        Use minimal container image (no dev tools)" >&2
     echo "  --permissive      Pass --dangerously-skip-permissions to claude" >&2
@@ -227,15 +228,28 @@ in
   DEV_ENV_TYPE=""
   DEV_ENV_SOURCE=""
   STATE_DIR=""
+  EXTRA_BINDS=()
+  EXTRA_ENVS=()
   PASSTHROUGH=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --anonymous)  ANONYMOUS=1; shift ;;
       --no-tools)   NO_TOOLS=1; shift ;;
       --permissive) PERMISSIVE=1; shift ;;
-      --devenv)     DEV_ENV=1; DEV_ENV_TYPE="devenv"; DEV_ENV_SOURCE="$2"; shift 2 ;;
-      --flake)      DEV_ENV=1; DEV_ENV_TYPE="flake"; DEV_ENV_SOURCE="$2"; shift 2 ;;
+      --devenv)
+        if [ "$DEV_ENV" = 1 ]; then
+          echo "error: --devenv and --flake are mutually exclusive" >&2; exit 1
+        fi
+        DEV_ENV=1; DEV_ENV_TYPE="devenv"; DEV_ENV_SOURCE="$2"; shift 2 ;;
+      --flake)
+        if [ "$DEV_ENV" = 1 ]; then
+          echo "error: --devenv and --flake are mutually exclusive" >&2; exit 1
+        fi
+        DEV_ENV=1; DEV_ENV_TYPE="flake"; DEV_ENV_SOURCE="$2"; shift 2 ;;
       --state-dir)  STATE_DIR="$2"; shift 2 ;;
+      --bind)       EXTRA_BINDS+=("$2:ro"); shift 2 ;;
+      --bind-rw)    EXTRA_BINDS+=("$2"); shift 2 ;;
+      --env)        EXTRA_ENVS+=("$2"); shift 2 ;;
       --) shift; PASSTHROUGH+=("$@"); break ;;
       *)  PASSTHROUGH+=("$1"); shift ;;
     esac

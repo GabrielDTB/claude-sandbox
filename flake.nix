@@ -36,14 +36,12 @@
         claude-sandboxed = final.callPackage ./package.nix { };
       };
 
-      # Build a customized sandbox with project-specific packages/binds/env.
+      # Build a customized sandbox with project-specific packages/devShell.
       # extraPackages can come from any nixpkgs — they're just store paths in the container.
       lib.mkSandbox =
         {
           system,
           extraPackages ? [ ],
-          extraBinds ? [ ],
-          extraEnv ? { },
           defaultTools ? null,
           devShell ? null,
         }:
@@ -54,7 +52,7 @@
           };
         in
         pkgs.callPackage ./package.nix {
-          inherit extraPackages extraBinds extraEnv defaultTools devShell;
+          inherit extraPackages defaultTools devShell;
         };
     };
 }

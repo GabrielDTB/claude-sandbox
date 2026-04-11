@@ -34,7 +34,6 @@
   libcap,
   defaultTools ? null,
   extraPackages ? [ ],
-  extraEnv ? { },
   devShell ? null,
 }:
 let
@@ -123,7 +122,6 @@ let
 
   allPackages = corePackages ++ toolPackages ++ extraPackages;
 
-  extraEnvList = lib.mapAttrsToList (k: v: "${k}=${v}") extraEnv;
 
   mkContainerImage =
     { name, packages, entrypoint ? null }:
@@ -196,8 +194,7 @@ let
           "DISABLE_UPGRADE_COMMAND=1"
           "DISABLE_LOGIN_COMMAND=1"
           "DISABLE_LOGOUT_COMMAND=1"
-        ]
-        ++ extraEnvList;
+        ];
         WorkingDir = "/workspace";
       }
       // lib.optionalAttrs (entrypoint != null) {
