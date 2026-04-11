@@ -35,24 +35,5 @@
       overlays.default = final: prev: {
         claude-sandboxed = final.callPackage ./package.nix { };
       };
-
-      # Build a customized sandbox with project-specific packages/devShell.
-      # extraPackages can come from any nixpkgs — they're just store paths in the container.
-      lib.mkSandbox =
-        {
-          system,
-          extraPackages ? [ ],
-          defaultTools ? null,
-          devShell ? null,
-        }:
-        let
-          pkgs = import nixpkgs {
-            inherit system;
-            config.allowUnfreePredicate = pkg: (nixpkgs.lib.getName pkg) == "claude-code";
-          };
-        in
-        pkgs.callPackage ./package.nix {
-          inherit extraPackages defaultTools devShell;
-        };
     };
 }
