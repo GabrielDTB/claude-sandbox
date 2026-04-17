@@ -29,11 +29,22 @@
           default = claude-sandboxed;
           test = claude-sandboxed.passthru.tests.sandbox;
           redteam = claude-sandboxed.passthru.tests.redteam;
+          proxy = pkgs.callPackage ./proxy.nix { };
         }
       );
 
       overlays.default = final: prev: {
         claude-sandboxed = final.callPackage ./package.nix { };
+        claude-proxy = final.callPackage ./proxy.nix { };
       };
+
+      nixosModules.default =
+        { pkgs, lib, ... }:
+        {
+          imports = [ ./module.nix ];
+          services.claude-proxy.package = lib.mkDefault (
+            self.packages.${pkgs.stdenv.hostPlatform.system}.proxy
+          );
+        };
     };
 }
