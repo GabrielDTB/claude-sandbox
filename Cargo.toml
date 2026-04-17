@@ -1,0 +1,66 @@
+[package]
+name = "claude-proxy"
+version = "0.1.0"
+edition = "2021"
+description = "OAuth forwarding proxy for sandboxed Claude Code"
+rust-version = "1.75"
+
+[[bin]]
+name = "claude-proxy"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime + HTTP.
+tokio = { version = "1.38", features = [
+    "macros",
+    "rt-multi-thread",
+    "net",
+    "io-util",
+    "signal",
+    "sync",
+    "time",
+] }
+hyper = { version = "1.4", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = [
+    "tokio",
+    "server",
+    "server-auto",
+    "client",
+    "client-legacy",
+    "http1",
+] }
+http-body-util = "0.1"
+
+# Pure-Rust TLS + system CA loader.
+hyper-rustls = { version = "0.27", default-features = false, features = [
+    "http1",
+    "ring",
+    "native-tokio",
+    "tls12",
+    "logging",
+] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std"] }
+rustls-native-certs = "0.7"
+rustls-pki-types = "1"
+
+# Serde / JSON.
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+# CLI + crypto bits.
+clap = { version = "4.5", features = ["derive", "wrap_help"] }
+sha2 = "0.10"
+hex = "0.4"
+rand = "0.8"
+base64 = "0.22"
+url = "2"
+
+# POSIX glue: setuid/setgid/setgroups, flock, getpwnam/getgrnam via libc.
+nix = { version = "0.29", features = ["user", "fs"] }
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

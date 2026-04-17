@@ -5,14 +5,23 @@
   extraPackages ? [ ],
   defaultTools ? null,
   devShell ? null,
+  # Rust auth proxy. Defaulted so the sandbox package keeps working when
+  # consumed as `pkgs.callPackage ./package.nix {}` without the overlay.
+  claude-proxy ? callPackage ./proxy.nix { },
 }:
 let
-  container = callPackage ./container.nix { inherit extraPackages defaultTools devShell; };
+  container = callPackage ./container.nix {
+    inherit
+      extraPackages
+      defaultTools
+      devShell
+      claude-proxy
+      ;
+  };
 
   testLib = ./test-lib.sh;
   testScript = ./test-sandbox.sh;
   redteamScript = ./test-redteam.sh;
-  authProxyScript = ./auth-proxy.py;
   # Port inside both containers. The sandbox reaches the proxy at this port via
   # pasta forwarding; the proxy listens on this port inside its container.
   # The host-side port is assigned dynamically to allow multiple sandboxes.
@@ -498,11 +507,10 @@ STUBEOF
       --pids-limit 64 \
       --memory 256m \
       -p "127.0.0.1::${authProxyPort}" \
-      -v "${authProxyScript}:${authProxyScript}:ro" \
       -v "$CREDS_FILE:/credentials.json:rw" \
       -e "INITIAL_TOKEN=$PROXY_TOKEN" \
       claude-auth-proxy:latest \
-      ${container.python3}/bin/python3 ${authProxyScript} serve \
+      ${container.claude-proxy}/bin/claude-proxy serve \
         --bind "0.0.0.0:${authProxyPort}" \
         --creds /credentials.json \
         --initial-token-env INITIAL_TOKEN \

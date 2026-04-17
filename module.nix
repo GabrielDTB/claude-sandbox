@@ -166,9 +166,9 @@ in
         StateDirectoryMode = "0750";
         UMask = "0077";
 
-        # Systemd hardening. The proxy is a small stdlib-only Python
-        # HTTP server that only needs outbound TCP (AF_INET/AF_INET6)
-        # and read/write on its state dir.
+        # Systemd hardening. The proxy is a small Rust HTTP server that
+        # only needs outbound TCP (AF_INET/AF_INET6) and read/write on
+        # its state dir.
         NoNewPrivileges = true;
         PrivateTmp = true;
         PrivateDevices = true;

@@ -28,6 +28,7 @@
   unzip,
   python3,
   # openssl,
+  claude-proxy,
   gh,
   iputils,
   busybox,
@@ -242,17 +243,18 @@ let
     }
   );
 
+  # Ultra-minimal proxy image: the Rust binary + a CA bundle. No shell, no
+  # coreutils, no interpreter. The sandbox launcher passes the full
+  # claude-proxy invocation on the `podman run` command line, so the image
+  # needs no entrypoint.
   proxyEnv = buildEnv {
     name = "proxy-env";
     paths = [
-      python3
-      coreutils
+      claude-proxy
       dockerTools.caCertificates
     ];
     pathsToLink = [
       "/bin"
-      "/lib"
-      "/lib64"
       "/etc"
     ];
   };
@@ -308,6 +310,7 @@ in
     bash
     git
     claude-code
+    claude-proxy
     ncurses
     gnugrep
     gnused
