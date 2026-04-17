@@ -1,4 +1,5 @@
 mod cli;
+mod config;
 mod devenv;
 mod firewall;
 mod images;
@@ -25,7 +26,18 @@ fn main() -> ExitCode {
 
 fn run() -> Result<ExitCode, Error> {
     use clap::Parser;
-    let cli = cli::Cli::parse();
+    let mut cli = cli::Cli::parse();
+
+    // Merge user config file as the fallback layer below flag/env. Clap has
+    // already resolved flag-or-env into Option<_>; anything still `None` is
+    // eligible for a config-provided default.
+    let cfg = config::load()?;
+    if cli.auth_proxy.is_none() {
+        cli.auth_proxy = cfg.auth_proxy;
+    }
+    if cli.auth_token_file.is_none() {
+        cli.auth_token_file = cfg.auth_token_file;
+    }
 
     if !has_podman() {
         return Err(
