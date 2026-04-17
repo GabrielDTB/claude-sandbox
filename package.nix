@@ -8,18 +8,20 @@
   # Rust auth proxy. Defaulted so `pkgs.callPackage ./package.nix {}` still
   # works without the overlay.
   claude-proxy ? callPackage ./proxy.nix { },
-  # Rust launcher. This is the package we re-export; everything below is just
-  # the red-team/functional test harness plumbing attached via `passthru`.
-  claude-sandboxed ? callPackage ./sandbox.nix {
+}:
+# NOTE: we deliberately do NOT take `claude-sandboxed` as a function argument.
+# The default overlay defines `pkgs.claude-sandboxed = callPackage ./package.nix {}`,
+# and `callPackage` auto-fills named args from `pkgs`, so declaring it here
+# would cause this file to recurse into itself during evaluation.
+let
+  claude-sandboxed = callPackage ./sandbox.nix {
     inherit
       extraPackages
       defaultTools
       devShell
       claude-proxy
       ;
-  },
-}:
-let
+  };
   container = claude-sandboxed.passthru.container;
 
   testLib = ./test-lib.sh;
