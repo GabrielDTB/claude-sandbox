@@ -1,0 +1,20 @@
+[package]
+name = "claude-sandboxed"
+description = "Sandbox launcher for Claude Code"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "claude-sandboxed"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "wrap_help", "env"] }
+url = "2"
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+hex = "0.4"
+rand = "0.8"
+tempfile = "3"
+libc = "0.2"

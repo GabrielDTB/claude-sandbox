@@ -30,6 +30,10 @@
           test = claude-sandboxed.passthru.tests.sandbox;
           redteam = claude-sandboxed.passthru.tests.redteam;
           proxy = pkgs.callPackage ./proxy.nix { };
+          # The pure launcher binary, without the test-harness passthru. Useful
+          # for consumers who want the Rust launcher but not the shell test
+          # scaffolding.
+          sandbox = pkgs.callPackage ./sandbox.nix { };
         }
       );
 

@@ -4,8 +4,9 @@ rustPlatform.buildRustPackage {
   pname = "claude-proxy";
   version = "0.1.0";
 
-  # Filter out build artefacts and the old Python reference so the src hash
-  # is stable across local `cargo build` runs.
+  # Both workspace crates share this src; `cargoBuildFlags = [-p …]` selects
+  # which crate Cargo actually compiles. Filtering drops build artefacts and
+  # docs so the src hash is stable across local `cargo build` runs.
   src = lib.cleanSourceWith {
     src = ./.;
     filter =
@@ -17,14 +18,15 @@ rustPlatform.buildRustPackage {
         base == "target"
         || base == "result"
         || base == ".direnv"
-        || lib.hasSuffix ".nix" base
         || lib.hasSuffix ".md" base
-        || lib.hasSuffix ".py" base
         || lib.hasSuffix ".sh" base
       );
   };
 
   cargoLock.lockFile = ./Cargo.lock;
+
+  cargoBuildFlags = [ "-p" "claude-proxy" ];
+  cargoTestFlags  = [ "-p" "claude-proxy" ];
 
   # Pure-Rust TLS (rustls + ring via rustls-native-certs): no openssl linkage,
   # no pkg-config dance. `ring` just needs a C compiler, which rustPlatform
