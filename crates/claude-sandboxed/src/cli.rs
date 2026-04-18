@@ -25,7 +25,7 @@ pub struct Cli {
     #[arg(long = "flake", value_name = "PATH")]
     pub flake: Option<PathBuf>,
 
-    /// State directory (default: ./.claude-sandbox-state)
+    /// State directory (default: ./.claude-sandboxed)
     #[arg(long = "state-dir", value_name = "PATH")]
     pub state_dir: Option<PathBuf>,
 

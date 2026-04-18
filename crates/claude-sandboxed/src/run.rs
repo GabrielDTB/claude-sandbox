@@ -7,7 +7,6 @@
 
 use std::ffi::OsString;
 use std::io::{IsTerminal, Write};
-use std::path::Path;
 use std::process::{Command, ExitCode};
 
 use crate::cli::Cli;
@@ -22,8 +21,6 @@ pub struct RunInputs<'a> {
     pub proxy_url: &'a str,
     /// `--network` value (pasta with or without -T forwarding).
     pub network: &'a str,
-    /// Stub credentials file on host side; mounted ro into /home/user/.claude/.credentials.json.
-    pub stub_creds: &'a Path,
     /// true when --devenv or --flake was set.
     pub dev_env: bool,
 }
@@ -116,12 +113,9 @@ pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, 
         state.firewall_script().display()
     )));
 
-    // Stub creds (shell calls this STUB_CREDS; always present in our flow).
-    push!("-v");
-    args.push(OsString::from(format!(
-        "{}:/home/user/.claude/.credentials.json:ro",
-        inputs.stub_creds.display()
-    )));
+    // The stub `.credentials.json` lives inside the claude/ bind-mount
+    // above (written by main.rs before launch) — no separate mount needed.
+    // It's writable by the sandbox and overwritten on the next launch.
 
     // claude.json (only if present — shell: `[ -f "$SANDBOX_DIR/claude.json" ]`).
     let claude_json = state.claude_json();

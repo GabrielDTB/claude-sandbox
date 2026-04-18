@@ -19,6 +19,9 @@ impl State {
     pub fn claude_dir(&self) -> PathBuf {
         self.sandbox_dir.join("claude")
     }
+    pub fn stub_creds(&self) -> PathBuf {
+        self.claude_dir().join(".credentials.json")
+    }
     pub fn box_git_dir(&self) -> PathBuf {
         self.sandbox_dir.join("box-git")
     }
@@ -59,7 +62,7 @@ pub fn prepare(workspace: &Path, state_dir: Option<&Path>) -> Result<State, crat
 
     let sandbox_dir = match state_dir {
         Some(p) => p.to_path_buf(),
-        None => PathBuf::from("./.claude-sandbox-state"),
+        None => PathBuf::from("./.claude-sandboxed"),
     };
     fs::create_dir_all(&sandbox_dir)?;
     let sandbox_dir = fs::canonicalize(&sandbox_dir)?;

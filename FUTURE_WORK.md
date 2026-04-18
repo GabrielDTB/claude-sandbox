@@ -14,6 +14,6 @@ The sandbox's PTY output is not filtered. A malicious agent can emit arbitrary e
 
 ## Concurrent launches against the same `box/`
 
-`$SANDBOX_DIR/setup-firewall.sh` is rewritten on every launcher invocation at a fixed path. Two concurrent launches sharing the same `box/` (and therefore the same `.claude-sandbox-state/`) race on that write; the same is true for the `claude.json` bootstrap, the shared `box-git/` directory, and (when `--devenv`/`--flake` are used) the dev-env cache.
+`$SANDBOX_DIR/setup-firewall.sh` is rewritten on every launcher invocation at a fixed path. Two concurrent launches sharing the same `box/` (and therefore the same `.claude-sandboxed/`) race on that write; the same is true for the `claude.json` bootstrap, the shared `box-git/` directory, and (when `--devenv`/`--flake` are used) the dev-env cache.
 
 The "multiple sandboxes can run simultaneously" note in `HARDENING.md` is intended for *different* boxes, each with its own state dir — that case is fine. Same-box concurrency is not a supported configuration. Low priority; fixing would mean per-launch subdirs or a lock file around state setup.

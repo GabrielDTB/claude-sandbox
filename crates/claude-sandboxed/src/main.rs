@@ -9,7 +9,6 @@ mod proxy_external;
 mod run;
 mod state;
 
-use std::io::Write;
 use std::process::{Command, ExitCode};
 
 pub type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -105,9 +104,10 @@ fn run() -> Result<ExitCode, Error> {
 
     // Stub credentials file. The `accessToken` here IS the sandbox-to-proxy
     // bearer: claude sends it; the proxy validates, strips, and substitutes
-    // the real OAuth token before forwarding upstream. Tempfile is cleaned
-    // up on drop.
-    let stub = write_stub_creds(&token)?;
+    // the real OAuth token before forwarding upstream. Lives inside the
+    // `claude/` bind-mount (writable by the sandbox) and is overwritten
+    // each launch.
+    write_stub_creds(&state.stub_creds(), &token)?;
 
     // Firewall script.
     firewall::write_script(&state.firewall_script(), carveout.as_deref())?;
@@ -117,14 +117,12 @@ fn run() -> Result<ExitCode, Error> {
         image_tag,
         proxy_url: &proxy_url,
         network: &network,
-        stub_creds: stub.path(),
         dev_env: cli.dev_env().is_some(),
     };
     let code = run::run(&cli, &state, inputs)?;
 
     // _embedded_guard drops here, tearing down the auth-proxy container
-    // only after the main sandbox has already exited. `stub` drops too,
-    // unlinking the stub-creds tempfile.
+    // only after the main sandbox has already exited.
     Ok(code)
 }
 
@@ -138,10 +136,24 @@ fn has_podman() -> bool {
         .unwrap_or(false)
 }
 
-/// Write the stub `.credentials.json` to a temp file. The JSON shape is
-/// copied verbatim from `package.nix:487` — Claude Code expects every key.
-fn write_stub_creds(token: &str) -> Result<tempfile::NamedTempFile, Error> {
-    let tmp = tempfile::NamedTempFile::new()?;
+/// Write the stub `.credentials.json` at `path`, overwriting any existing
+/// file. The JSON shape is copied verbatim from `package.nix:487` — Claude
+/// Code expects every key.
+///
+/// A prior run's in-container claude may have left a file here owned by
+/// an unmapped subuid (shows up as e.g. `0:100000` on the host). We own
+/// the parent `claude/` dir, so we can unlink regardless of ownership;
+/// the fresh file is then created by the launching user.
+fn write_stub_creds(path: &std::path::Path, token: &str) -> Result<(), Error> {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(
+                format!("failed to remove stale stub creds at {}: {e}", path.display()).into(),
+            );
+        }
+    }
     let body = serde_json::json!({
         "claudeAiOauth": {
             "accessToken":      token,
@@ -158,9 +170,8 @@ fn write_stub_creds(token: &str) -> Result<tempfile::NamedTempFile, Error> {
             "rateLimitTier":    "standard"
         }
     });
-    let mut f = tmp.as_file();
-    f.write_all(serde_json::to_string(&body)?.as_bytes())?;
-    f.write_all(b"\n")?;
-    f.flush()?;
-    Ok(tmp)
+    let mut buf = serde_json::to_vec(&body)?;
+    buf.push(b'\n');
+    std::fs::write(path, buf)?;
+    Ok(())
 }
