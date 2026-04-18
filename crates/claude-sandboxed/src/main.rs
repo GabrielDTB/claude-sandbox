@@ -25,7 +25,28 @@ fn main() -> ExitCode {
 
 fn run() -> Result<ExitCode, Error> {
     use clap::Parser;
+    use std::io::Write;
     let mut cli = cli::Cli::parse();
+
+    // Informational short-circuits — handled before anything touches the
+    // filesystem or podman, so they work in environments where the real
+    // run path wouldn't (e.g. no $HOME, no podman).
+    if cli.print_default_config {
+        // stdout; ignore EPIPE (e.g. piped to `head`) just like pagers do.
+        match std::io::stdout().write_all(config::REFERENCE.as_bytes()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+            Err(e) => return Err(e.into()),
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    // `required_unless_present = "print_default_config"` on the clap arg
+    // guarantees this is Some by the time we get here.
+    let workspace = cli
+        .workspace
+        .clone()
+        .expect("clap enforces workspace presence outside --print-default-config");
 
     // Merge user config file as the fallback layer below flag/env. Clap has
     // already resolved flag-or-env into Option<_>; anything still `None` is
@@ -37,6 +58,10 @@ fn run() -> Result<ExitCode, Error> {
     if cli.auth_token_file.is_none() {
         cli.auth_token_file = cfg.auth_token_file;
     }
+    let seed = state::Seed {
+        model: cfg.default_model,
+        theme: cfg.default_theme,
+    };
 
     if !has_podman() {
         return Err(
@@ -46,7 +71,7 @@ fn run() -> Result<ExitCode, Error> {
         );
     }
 
-    let state = state::prepare(&cli.workspace, cli.state_dir.as_deref())?;
+    let state = state::prepare(&workspace, cli.state_dir.as_deref(), &seed)?;
 
     // Dev-env must be captured before firewall / run so that
     // dev-closure-paths exists when run.rs reads it for bind mounts.

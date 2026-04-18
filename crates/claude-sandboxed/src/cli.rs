@@ -14,8 +14,11 @@ use std::path::PathBuf;
 )]
 pub struct Cli {
     /// Project directory exposed as /workspace inside the sandbox.
-    #[arg(value_name = "WORKSPACE")]
-    pub workspace: PathBuf,
+    ///
+    /// Required for normal operation; optional only when one of the
+    /// informational flags (e.g. `--print-default-config`) is used.
+    #[arg(value_name = "WORKSPACE", required_unless_present = "print_default_config")]
+    pub workspace: Option<PathBuf>,
 
     /// Inject dev environment from a devenv project.
     #[arg(long = "devenv", value_name = "PATH", conflicts_with = "flake")]
@@ -76,6 +79,14 @@ pub struct Cli {
         env = "CLAUDE_SANDBOX_AUTH_TOKEN_FILE"
     )]
     pub auth_token_file: Option<PathBuf>,
+
+    /// Print an annotated reference config to stdout and exit.
+    ///
+    /// Pipe into `~/.config/claude-sandboxed/config.toml` to bootstrap a
+    /// new config file — every example value is commented out, so it's a
+    /// no-op until you uncomment the fields you want.
+    #[arg(long = "print-default-config")]
+    pub print_default_config: bool,
 
     /// Extra args passed through to `claude` inside the sandbox.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]

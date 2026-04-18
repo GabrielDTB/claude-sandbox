@@ -14,6 +14,8 @@
 //! # ~/.config/claude-sandboxed/config.toml
 //! auth_proxy      = "http://proxy.tailnet.ts.net:28080"
 //! auth_token_file = "/home/me/.config/claude-sandboxed/sandbox-token"
+//! default_model   = "opus"     # seeds `model` in a fresh sandbox's claude.json
+//! default_theme   = "dark"     # seeds `theme` in a fresh sandbox's claude.json
 //! ```
 //!
 //! Unknown keys are rejected (deny-unknown-fields) so typos surface as errors
@@ -28,6 +30,50 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+/// Annotated TOML reference for the user-global config. Printed by
+/// `claude-sandboxed --print-default-config`, and intended to be pipeable
+/// directly into `~/.config/claude-sandboxed/config.toml`.
+///
+/// All example values are commented out, so piping this file into place
+/// yields a no-op config that the user can then selectively uncomment.
+///
+/// The drift tests at the bottom of this module keep the field names here
+/// in lockstep with the `Config` struct — `deny_unknown_fields` would reject
+/// any typo once the example line is uncommented.
+pub const REFERENCE: &str = "\
+# claude-sandboxed global configuration
+#
+# Location: $XDG_CONFIG_HOME/claude-sandboxed/config.toml
+#           (falls back to $HOME/.config/claude-sandboxed/config.toml)
+#
+# Precedence: CLI flag > environment variable > this file > built-in default.
+# Unknown keys are rejected, so typos fail loudly rather than silently.
+# Paths: a leading `~` or `~/` expands to $HOME; other relative paths
+# resolve against this file's own directory.
+
+# --- Auth proxy -------------------------------------------------------------
+
+# URL of an external auth proxy to route Claude API traffic through.
+# Equivalent to --auth-proxy / $CLAUDE_SANDBOX_AUTH_PROXY.
+# auth_proxy = \"http://proxy.tailnet.ts.net:28080\"
+
+# Path to the file containing the sandbox bearer token for the external
+# proxy. Required whenever `auth_proxy` is set.
+# Equivalent to --auth-token-file / $CLAUDE_SANDBOX_AUTH_TOKEN_FILE.
+# auth_token_file = \"~/.config/claude-sandboxed/sandbox-token\"
+
+# --- Sandbox seed values ----------------------------------------------------
+# These apply only when a sandbox's claude.json is being bootstrapped for
+# the first time. Existing sandboxes keep whatever the user set inside
+# (e.g. via /model or /theme).
+
+# Value used to seed `model` in a fresh sandbox's claude.json.
+# default_model = \"opus\"
+
+# Value used to seed `theme` in a fresh sandbox's claude.json.
+# default_theme = \"dark\"
+";
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -35,6 +81,13 @@ pub struct Config {
     pub auth_proxy: Option<String>,
     /// Default value for `--auth-token-file` / `CLAUDE_SANDBOX_AUTH_TOKEN_FILE`.
     pub auth_token_file: Option<PathBuf>,
+    /// Seed value for `model` in a newly bootstrapped sandbox's `claude.json`.
+    /// Applied only when the per-sandbox `claude.json` is being created fresh;
+    /// existing sandboxes keep whatever `/model` the user picked inside.
+    pub default_model: Option<String>,
+    /// Seed value for `theme` in a newly bootstrapped sandbox's `claude.json`.
+    /// Same "new-sandbox-only" semantics as `default_model`.
+    pub default_theme: Option<String>,
 }
 
 /// Resolve the config path, preferring `$XDG_CONFIG_HOME` then
@@ -155,6 +208,19 @@ mod tests {
     }
 
     #[test]
+    fn parses_default_model_and_theme() {
+        let f = write_config(
+            r#"
+                default_model = "opus"
+                default_theme = "dark"
+            "#,
+        );
+        let c = parse_at(f.path()).unwrap();
+        assert_eq!(c.default_model.as_deref(), Some("opus"));
+        assert_eq!(c.default_theme.as_deref(), Some("dark"));
+    }
+
+    #[test]
     fn empty_file_parses_as_default() {
         let f = write_config("");
         let c = parse_at(f.path()).unwrap();
@@ -228,5 +294,46 @@ mod tests {
     fn tilde_without_home_errors() {
         let err = expand("~/tok", None).unwrap_err().to_string();
         assert!(err.contains("HOME is unset"), "got: {err}");
+    }
+
+    #[test]
+    fn reference_parses_as_default() {
+        // All example values in REFERENCE are commented out, so parsing it
+        // verbatim must yield an all-None config. Guards against anyone
+        // accidentally un-commenting an example.
+        let c: Config = toml::from_str(super::REFERENCE).unwrap();
+        assert!(c.auth_proxy.is_none());
+        assert!(c.auth_token_file.is_none());
+        assert!(c.default_model.is_none());
+        assert!(c.default_theme.is_none());
+    }
+
+    #[test]
+    fn reference_field_names_match_config() {
+        // Strip the leading `# ` from every line that looks like a commented
+        // assignment (`# ident = ...`) and parse the result. Because Config
+        // uses `deny_unknown_fields`, a renamed/typo'd field in REFERENCE
+        // will fail here — which is exactly the drift we want to catch.
+        let uncommented: String = super::REFERENCE
+            .lines()
+            .map(|line| {
+                let after_hash = line.trim_start().strip_prefix('#').map(str::trim_start);
+                match after_hash {
+                    Some(rest)
+                        if rest
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_ascii_alphabetic())
+                            && rest.contains('=') =>
+                    {
+                        rest.to_string()
+                    }
+                    _ => line.to_string(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        toml::from_str::<Config>(&uncommented)
+            .expect("reference TOML has a field name that doesn't match Config");
     }
 }
