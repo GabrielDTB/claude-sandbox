@@ -80,6 +80,31 @@ pub struct Cli {
     )]
     pub auth_token_file: Option<PathBuf>,
 
+    /// Copy the host workspace's `.git` into the sandbox (force-on).
+    ///
+    /// When set, re-syncs `box-git/` from the host `.git` on this launch,
+    /// overwriting whatever the sandbox did to its own copy. Equivalent to
+    /// turning `copy_git_on_launch` on in config for this run.
+    #[arg(
+        long = "copy-git",
+        action = clap::ArgAction::SetTrue,
+        overrides_with = "no_copy_git",
+        default_value_t = false,
+    )]
+    pub copy_git: bool,
+
+    /// Disable all git-directory copying for this launch.
+    ///
+    /// Forces both `copy_git_on_init` and `copy_git_on_launch` off for this
+    /// run, regardless of config. The sandbox sees an empty `.git`.
+    #[arg(
+        long = "no-copy-git",
+        action = clap::ArgAction::SetTrue,
+        overrides_with = "copy_git",
+        default_value_t = false,
+    )]
+    pub no_copy_git: bool,
+
     /// Print an annotated reference config to stdout and exit.
     ///
     /// Pipe into `~/.config/claude-sandboxed/config.toml` to bootstrap a
@@ -105,6 +130,18 @@ impl Cli {
         match (&self.flake, &self.devenv) {
             (Some(p), None) => Some(DevEnv::Flake(p.clone())),
             (None, Some(p)) => Some(DevEnv::Devenv(p.clone())),
+            _ => None,
+        }
+    }
+
+    /// Resolve the `--copy-git` / `--no-copy-git` pair into a single override.
+    /// `None` = no CLI override (fall back to config); `Some(true)` = force on;
+    /// `Some(false)` = force off. The clap `overrides_with` pairing guarantees
+    /// at most one of the two booleans is set.
+    pub fn copy_git_override(&self) -> Option<bool> {
+        match (self.copy_git, self.no_copy_git) {
+            (true, _) => Some(true),
+            (_, true) => Some(false),
             _ => None,
         }
     }

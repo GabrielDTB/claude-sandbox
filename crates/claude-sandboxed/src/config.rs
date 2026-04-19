@@ -72,6 +72,18 @@ pub const REFERENCE: &str = "\
 
 # Value used to seed `theme` in a fresh sandbox's claude.json.
 # default_theme = \"dark\"
+
+# --- Git integration --------------------------------------------------------
+# On the first launch of a given sandbox — i.e. when .claude-sandboxed/box-git
+# is uninitialized — copy the workspace's .git directory into box-git so the
+# agent sees a working repo. Disable to keep the sandbox's .git empty.
+# Equivalent to --copy-git / --no-copy-git when no CLI flag is passed.
+# copy_git_on_init = true
+
+# On every launch, wipe box-git and re-copy from the host .git. Overwrites
+# whatever the sandbox did to its own repo. Implies copy_git_on_init.
+# Equivalent to passing --copy-git on every run.
+# copy_git_on_launch = false
 ";
 
 #[derive(Debug, Default, Deserialize)]
@@ -88,6 +100,14 @@ pub struct Config {
     /// Seed value for `theme` in a newly bootstrapped sandbox's `claude.json`.
     /// Same "new-sandbox-only" semantics as `default_model`.
     pub default_theme: Option<String>,
+    /// Copy the host workspace's `.git` into the sandbox's `box-git/` the
+    /// first time a sandbox is initialized. Defaults to `true` when unset —
+    /// giving the agent a working repo is the expected behavior.
+    pub copy_git_on_init: Option<bool>,
+    /// Re-copy the host `.git` into `box-git/` on every launch, overwriting
+    /// whatever the sandbox did to its own repo copy. Defaults to `false`.
+    /// Implies `copy_git_on_init`.
+    pub copy_git_on_launch: Option<bool>,
 }
 
 /// Resolve the config path, preferring `$XDG_CONFIG_HOME` then
@@ -208,6 +228,19 @@ mod tests {
     }
 
     #[test]
+    fn parses_git_flags() {
+        let f = write_config(
+            r#"
+                copy_git_on_init   = false
+                copy_git_on_launch = true
+            "#,
+        );
+        let c = parse_at(f.path()).unwrap();
+        assert_eq!(c.copy_git_on_init, Some(false));
+        assert_eq!(c.copy_git_on_launch, Some(true));
+    }
+
+    #[test]
     fn parses_default_model_and_theme() {
         let f = write_config(
             r#"
@@ -306,6 +339,8 @@ mod tests {
         assert!(c.auth_token_file.is_none());
         assert!(c.default_model.is_none());
         assert!(c.default_theme.is_none());
+        assert!(c.copy_git_on_init.is_none());
+        assert!(c.copy_git_on_launch.is_none());
     }
 
     #[test]

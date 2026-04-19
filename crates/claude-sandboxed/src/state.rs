@@ -5,7 +5,24 @@
 //! subdirs, bootstrap `claude.json` if missing/empty.
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+
+/// Controls how the host workspace's `.git` directory is propagated into
+/// the sandbox's `box-git/` copy.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum GitCopyMode {
+    /// Never copy. `box-git/` stays empty unless the sandbox itself writes
+    /// to it. Equivalent to the pre-feature behavior.
+    Off,
+    /// Copy only when `box-git/` is uninitialized. Later launches preserve
+    /// whatever the sandbox did.
+    #[default]
+    OnInit,
+    /// Wipe `box-git/` and copy on every launch. Host → sandbox is the
+    /// only direction — the sandbox's mutations are discarded.
+    OnLaunch,
+}
 
 /// Paths resolved and created at launch time.
 pub struct State {
@@ -61,6 +78,7 @@ pub fn prepare(
     workspace: &Path,
     state_dir: Option<&Path>,
     seed: &Seed,
+    git_copy: GitCopyMode,
 ) -> Result<State, crate::Error> {
     let box_dir = fs::canonicalize(workspace).map_err(|e| -> crate::Error {
         format!(
@@ -88,8 +106,16 @@ pub fn prepare(
     fs::create_dir_all(state.claude_dir())?;
     fs::create_dir_all(state.box_git_dir())?;
 
+    // Populate box-git/ from the host .git according to the copy mode.
+    // Runs BEFORE the mount-target mkdir below so the "host has no real
+    // repo" check isn't fooled by our own placeholder.
+    maybe_copy_git(&state, git_copy)?;
+
     // Shell does `mkdir -p "$BOX_DIR/.git"` if missing — lets git tooling
     // inside the container initialize freely without write perms on BOX_DIR.
+    // When the workspace already has a real `.git/`, this is a no-op; the
+    // directory is only ever covered by the bind mount from the container's
+    // perspective.
     let box_git = state.box_dir.join(".git");
     if !box_git.exists() {
         fs::create_dir_all(&box_git)?;
@@ -122,6 +148,116 @@ pub fn prepare(
     Ok(state)
 }
 
+/// Drive the host-`.git` → `box-git/` copy according to `mode`.
+///
+/// - `Off` → no-op.
+/// - `OnInit` → only when `box-git/HEAD` doesn't exist *and* the host `.git`
+///   looks like a real repo (has a `HEAD` file).
+/// - `OnLaunch` → wipe the existing `box-git/` contents (if any) and copy.
+///
+/// The "real repo" probe (`HEAD` exists) distinguishes three cases:
+/// - host has a populated `.git/` — copy.
+/// - host has the empty placeholder dir created by a previous launch — skip.
+/// - host has a `.git` *file* (submodule / linked worktree) — skip; the copy
+///   would need gitdir indirection handling we don't want to reimplement.
+fn maybe_copy_git(state: &State, mode: GitCopyMode) -> Result<(), crate::Error> {
+    if matches!(mode, GitCopyMode::Off) {
+        return Ok(());
+    }
+    let src = state.box_dir.join(".git");
+    let dst = state.box_git_dir();
+
+    // Treat as "real repo" iff src is a directory containing HEAD. File-form
+    // `.git` (submodule) or the empty mount-target both miss this.
+    if !src.is_dir() || !src.join("HEAD").is_file() {
+        if src.exists() && !src.join("HEAD").is_file() {
+            eprintln!(
+                "claude-sandboxed: host .git at {} is not a populated repo; \
+                 skipping git copy",
+                src.display()
+            );
+        }
+        return Ok(());
+    }
+
+    let box_git_initialized = dst.join("HEAD").is_file();
+    match mode {
+        GitCopyMode::Off => unreachable!(),
+        GitCopyMode::OnInit if box_git_initialized => return Ok(()),
+        GitCopyMode::OnInit => {}
+        GitCopyMode::OnLaunch => {
+            // Wipe box-git/ contents but keep the directory itself so the
+            // bind mount target stays put. A prior in-container claude may
+            // have left files owned by a subuid — we own the parent dir, so
+            // removal is fine regardless.
+            clear_dir_contents(&dst)?;
+        }
+    }
+
+    copy_tree(&src, &dst)?;
+    Ok(())
+}
+
+/// Recursively remove everything inside `dir`, preserving `dir` itself.
+fn clear_dir_contents(dir: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let ft = entry.file_type()?;
+        if ft.is_dir() && !ft.is_symlink() {
+            fs::remove_dir_all(&path)?;
+        } else {
+            fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Copy `src` into `dst` recursively, `cp -a`-ish: files, directories, and
+/// symlinks preserved; Unix permission bits preserved. Skips any file named
+/// `*.lock` to avoid picking up a host-side git's in-progress index lock.
+fn copy_tree(src: &Path, dst: &Path) -> io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if let Some(s) = name.to_str() {
+            if s.ends_with(".lock") {
+                continue;
+            }
+        }
+        let from = entry.path();
+        let to = dst.join(&name);
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            let target = fs::read_link(&from)?;
+            // Best-effort remove of any pre-existing entry at `to`.
+            let _ = fs::remove_file(&to);
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&target, &to)?;
+            #[cfg(not(unix))]
+            {
+                let _ = target;
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "symlink copy requires unix",
+                ));
+            }
+        } else if ft.is_dir() {
+            copy_tree(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = entry.metadata()?.permissions().mode();
+                fs::set_permissions(&to, fs::Permissions::from_mode(mode))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,7 +272,7 @@ mod tests {
             model: Some("opus".into()),
             theme: Some("dark".into()),
         };
-        let s = prepare(&ws, Some(&sd), &seed).unwrap();
+        let s = prepare(&ws, Some(&sd), &seed, GitCopyMode::Off).unwrap();
         let body = fs::read_to_string(s.claude_json()).unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["hasCompletedOnboarding"], serde_json::Value::Bool(true));
@@ -150,11 +286,98 @@ mod tests {
         let ws = tmp.path().join("ws");
         fs::create_dir_all(&ws).unwrap();
         let sd = tmp.path().join("state");
-        let s = prepare(&ws, Some(&sd), &Seed::default()).unwrap();
+        let s = prepare(&ws, Some(&sd), &Seed::default(), GitCopyMode::Off).unwrap();
         let body = fs::read_to_string(s.claude_json()).unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(v.get("model").is_none());
         assert!(v.get("theme").is_none());
+    }
+
+    /// Build a workspace directory that looks like a real git repo: a
+    /// `HEAD`, a packed-ref file, and a hook file in a nested dir. Returns
+    /// the workspace path. The caller keeps ownership of `tmp`.
+    fn seed_real_repo(ws: &Path) {
+        let git = ws.join(".git");
+        fs::create_dir_all(git.join("refs/heads")).unwrap();
+        fs::create_dir_all(git.join("hooks")).unwrap();
+        fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(git.join("refs/heads/main"), "deadbeef\n").unwrap();
+        fs::write(git.join("hooks/pre-commit.sample"), "#!/bin/sh\nexit 0\n").unwrap();
+        // A `.lock` file that MUST be skipped by the copier.
+        fs::write(git.join("index.lock"), "lock").unwrap();
+    }
+
+    #[test]
+    fn copy_on_init_populates_box_git_from_host() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        fs::create_dir_all(&ws).unwrap();
+        seed_real_repo(&ws);
+        let sd = tmp.path().join("state");
+        let s = prepare(&ws, Some(&sd), &Seed::default(), GitCopyMode::OnInit).unwrap();
+        let bg = s.box_git_dir();
+        assert_eq!(fs::read_to_string(bg.join("HEAD")).unwrap(), "ref: refs/heads/main\n");
+        assert_eq!(fs::read_to_string(bg.join("refs/heads/main")).unwrap(), "deadbeef\n");
+        assert!(bg.join("hooks/pre-commit.sample").is_file());
+        assert!(!bg.join("index.lock").exists(), "lock files must be skipped");
+    }
+
+    #[test]
+    fn copy_on_init_skips_when_box_git_initialized() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        fs::create_dir_all(&ws).unwrap();
+        seed_real_repo(&ws);
+        let sd = tmp.path().join("state");
+        fs::create_dir_all(sd.join("box-git")).unwrap();
+        // Sentinel: a fake HEAD pointing somewhere else. A skipped copy
+        // leaves this untouched; a performed copy overwrites it.
+        fs::write(sd.join("box-git").join("HEAD"), "sentinel\n").unwrap();
+        let s = prepare(&ws, Some(&sd), &Seed::default(), GitCopyMode::OnInit).unwrap();
+        assert_eq!(fs::read_to_string(s.box_git_dir().join("HEAD")).unwrap(), "sentinel\n");
+    }
+
+    #[test]
+    fn copy_on_launch_overwrites_existing_box_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        fs::create_dir_all(&ws).unwrap();
+        seed_real_repo(&ws);
+        let sd = tmp.path().join("state");
+        fs::create_dir_all(sd.join("box-git")).unwrap();
+        fs::write(sd.join("box-git/HEAD"), "sentinel\n").unwrap();
+        // A file that only exists in the sentinel; it must be gone post-copy.
+        fs::write(sd.join("box-git/sandbox-only"), "x").unwrap();
+        let s = prepare(&ws, Some(&sd), &Seed::default(), GitCopyMode::OnLaunch).unwrap();
+        let bg = s.box_git_dir();
+        assert_eq!(fs::read_to_string(bg.join("HEAD")).unwrap(), "ref: refs/heads/main\n");
+        assert!(!bg.join("sandbox-only").exists(), "pre-existing sandbox file should be wiped");
+    }
+
+    #[test]
+    fn off_leaves_box_git_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        fs::create_dir_all(&ws).unwrap();
+        seed_real_repo(&ws);
+        let sd = tmp.path().join("state");
+        let s = prepare(&ws, Some(&sd), &Seed::default(), GitCopyMode::Off).unwrap();
+        let bg = s.box_git_dir();
+        assert!(!bg.join("HEAD").exists());
+        assert!(bg.is_dir(), "box-git dir itself should still exist");
+    }
+
+    #[test]
+    fn missing_host_git_noops_with_copy_on_init() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        fs::create_dir_all(&ws).unwrap();
+        let sd = tmp.path().join("state");
+        let s = prepare(&ws, Some(&sd), &Seed::default(), GitCopyMode::OnInit).unwrap();
+        assert!(!s.box_git_dir().join("HEAD").exists());
+        // And the empty `.git` placeholder on the host was created so the
+        // bind mount has somewhere to land.
+        assert!(s.box_dir.join(".git").is_dir());
     }
 
     #[test]
@@ -167,7 +390,7 @@ mod tests {
         // Pre-seed an existing sandbox with a user-chosen model.
         fs::write(sd.join("claude.json"), br#"{"model":"sonnet"}"#).unwrap();
         let seed = Seed { model: Some("opus".into()), theme: None };
-        let s = prepare(&ws, Some(&sd), &seed).unwrap();
+        let s = prepare(&ws, Some(&sd), &seed, GitCopyMode::Off).unwrap();
         let body = fs::read_to_string(s.claude_json()).unwrap();
         assert!(body.contains("sonnet"), "existing content clobbered: {body}");
     }

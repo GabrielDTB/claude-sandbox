@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod devenv;
 mod firewall;
+mod hookscan;
 mod images;
 mod paths;
 mod proxy_embedded;
@@ -58,6 +59,15 @@ fn run() -> Result<ExitCode, Error> {
     if cli.auth_token_file.is_none() {
         cli.auth_token_file = cfg.auth_token_file;
     }
+    // Git integration mode: CLI flag overrides config entirely; otherwise
+    // fall back to the config fields, with built-in defaults (init:on,
+    // launch:off) for anything still unset.
+    let git_copy = resolve_git_copy_mode(
+        cli.copy_git_override(),
+        cfg.copy_git_on_init,
+        cfg.copy_git_on_launch,
+    );
+
     let seed = state::Seed {
         model: cfg.default_model,
         theme: cfg.default_theme,
@@ -71,7 +81,17 @@ fn run() -> Result<ExitCode, Error> {
         );
     }
 
-    let state = state::prepare(&workspace, cli.state_dir.as_deref(), &seed)?;
+    let state = state::prepare(&workspace, cli.state_dir.as_deref(), &seed, git_copy)?;
+
+    // Snapshot hook-like files in the workspace so the post-run diff can
+    // flag new/modified/removed entries. Done AFTER `state::prepare` so the
+    // state dir (which we skip during scan) exists, but BEFORE any dev-env
+    // capture writes into the state dir — the scan excludes that subtree
+    // anyway, but keeping the ordering simple avoids surprises.
+    let hook_snapshot_path = state.sandbox_dir.join("git-hooks-snapshot.json");
+    if let Err(e) = hookscan::snapshot(&state.box_dir, &hook_snapshot_path) {
+        eprintln!("claude-sandboxed: hook-snapshot failed (continuing): {e}");
+    }
 
     // Dev-env must be captured before firewall / run so that
     // dev-closure-paths exists when run.rs reads it for bind mounts.
@@ -146,9 +166,42 @@ fn run() -> Result<ExitCode, Error> {
     };
     let code = run::run(&cli, &state, inputs)?;
 
+    // Post-run hook-change detection. We deliberately run this before
+    // `_embedded_guard` drops so the warning is the last thing the user
+    // sees, ahead of any auth-proxy teardown log spam.
+    if let Err(e) = hookscan::verify(&state.box_dir, &hook_snapshot_path) {
+        eprintln!("claude-sandboxed: hook-verify failed: {e}");
+    }
+
     // _embedded_guard drops here, tearing down the auth-proxy container
     // only after the main sandbox has already exited.
     Ok(code)
+}
+
+/// Reduce the `--copy-git` / `--no-copy-git` override + config fields into
+/// the effective `GitCopyMode`. CLI wins entirely when set; otherwise the
+/// config's launch/init fields combine, each defaulting to their documented
+/// built-in (init:on, launch:off).
+fn resolve_git_copy_mode(
+    cli_override: Option<bool>,
+    cfg_on_init: Option<bool>,
+    cfg_on_launch: Option<bool>,
+) -> state::GitCopyMode {
+    match cli_override {
+        Some(true) => state::GitCopyMode::OnLaunch,
+        Some(false) => state::GitCopyMode::Off,
+        None => {
+            let launch = cfg_on_launch.unwrap_or(false);
+            let init = cfg_on_init.unwrap_or(true);
+            if launch {
+                state::GitCopyMode::OnLaunch
+            } else if init {
+                state::GitCopyMode::OnInit
+            } else {
+                state::GitCopyMode::Off
+            }
+        }
+    }
 }
 
 fn has_podman() -> bool {
@@ -199,4 +252,44 @@ fn write_stub_creds(path: &std::path::Path, token: &str) -> Result<(), Error> {
     buf.push(b'\n');
     std::fs::write(path, buf)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use state::GitCopyMode;
+
+    #[test]
+    fn no_cli_no_config_defaults_to_on_init() {
+        assert_eq!(resolve_git_copy_mode(None, None, None), GitCopyMode::OnInit);
+    }
+
+    #[test]
+    fn cli_copy_git_forces_on_launch() {
+        assert_eq!(
+            resolve_git_copy_mode(Some(true), Some(false), Some(false)),
+            GitCopyMode::OnLaunch
+        );
+    }
+
+    #[test]
+    fn cli_no_copy_git_forces_off() {
+        assert_eq!(
+            resolve_git_copy_mode(Some(false), Some(true), Some(true)),
+            GitCopyMode::Off
+        );
+    }
+
+    #[test]
+    fn config_launch_beats_init() {
+        assert_eq!(
+            resolve_git_copy_mode(None, Some(false), Some(true)),
+            GitCopyMode::OnLaunch
+        );
+    }
+
+    #[test]
+    fn config_init_false_overrides_default() {
+        assert_eq!(resolve_git_copy_mode(None, Some(false), None), GitCopyMode::Off);
+    }
 }
