@@ -6,11 +6,12 @@
 //! image via `buildEnv`, no need to thread Nix store paths through.
 
 use std::ffi::OsString;
-use std::io::{IsTerminal, Write};
-use std::process::{Command, ExitCode};
+use std::io::IsTerminal;
+use std::process::ExitCode;
 
 use crate::cli::Cli;
 use crate::paths;
+use crate::pty;
 use crate::state::State;
 
 /// Everything a single `podman run` needs beyond the `Cli`/`State`.
@@ -21,10 +22,14 @@ pub struct RunInputs<'a> {
     pub proxy_url: &'a str,
     /// `--network` value (pasta with or without -T forwarding).
     pub network: &'a str,
-    /// Deterministic container name (`claude-sandbox-<pid>`). Lets the
-    /// suspend module pause/unpause by name, and the reap module clean
-    /// up leftovers from killed launchers.
+    /// Deterministic container name (`claude-sandbox-<pid>`). The
+    /// reap module uses the PID suffix to distinguish killed siblings
+    /// from live concurrent sessions; the pty module pauses by name on ^Z.
     pub container_name: &'a str,
+    /// Auth-proxy container name, if we spawned one. `None` for external
+    /// proxy (not ours to pause). Passed to the pty module so ^Z freezes
+    /// both containers together.
+    pub proxy_container_name: Option<&'a str>,
     /// true when --devenv or --flake was set.
     pub dev_env: bool,
 }
@@ -41,9 +46,9 @@ pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, 
 
     push!("run");
     push!("--rm");
-    // Deterministic per-launcher name — `suspend` pauses/unpauses by
-    // name, and `reap` uses the PID suffix to distinguish killed
-    // siblings from live concurrent sessions.
+    // Deterministic per-launcher name — `pty` pauses/unpauses by name on
+    // ^Z, and `reap` uses the PID suffix to distinguish killed siblings
+    // from live concurrent sessions.
     push!("--name");
     push!(inputs.container_name);
 
@@ -225,19 +230,11 @@ pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, 
         args.push(OsString::from(a.clone()));
     }
 
-    // Spawn podman. stdio is inherited so interactive sessions Just Work.
-    let status = Command::new("podman").args(&args).status().map_err(|e| -> crate::Error {
-        format!("failed to spawn `podman run`: {e}").into()
-    })?;
-
-    // Reset terminal: colors + cursor-visibility, mirrors `tput sgr0; tput cnorm`.
-    let _ = std::io::stdout().write_all(b"\x1b[0m\x1b[?25h");
-    let _ = std::io::stdout().flush();
-
-    match status.code() {
-        Some(c) if (0..=255).contains(&c) => Ok(ExitCode::from(c as u8)),
-        _ => Ok(ExitCode::from(1)),
-    }
+    // Hand off to the pty interposer. It owns stdio end-to-end (opens a
+    // pty, forks podman onto the slave, pumps bytes, intercepts ^Z) and
+    // falls back to a direct spawn when stdin isn't a tty. It also
+    // restores the host termios and resets SGR/cursor on the way out.
+    pty::run(&args, inputs.container_name, inputs.proxy_container_name)
 }
 
 fn gh_token() -> Result<Option<String>, crate::Error> {

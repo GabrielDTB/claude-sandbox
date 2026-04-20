@@ -7,10 +7,10 @@ mod images;
 mod paths;
 mod proxy_embedded;
 mod proxy_external;
+mod pty;
 mod reap;
 mod run;
 mod state;
-mod suspend;
 
 use std::process::{Command, ExitCode};
 
@@ -175,12 +175,12 @@ fn run() -> Result<ExitCode, Error> {
     // Firewall script.
     firewall::write_script(&state.firewall_script(), carveout.as_deref())?;
 
-    // Wire ctrl+z / `fg` to pause+unpause both containers; see
-    // `suspend` for the mechanism. The name built here MUST match the
-    // `--name` we pass to `podman run` below — suspend pauses by name.
+    // Deterministic name — ctrl+z handling in `pty` pauses by name, and
+    // `reap` uses the PID suffix to distinguish killed siblings from
+    // live concurrent sessions. Must match the `--name` the run module
+    // passes to `podman run`.
     let sandbox_name = format!("claude-sandbox-{}", std::process::id());
-    let proxy_name = _embedded_guard.as_ref().map(|e| e.container_name.clone());
-    suspend::install(sandbox_name.clone(), proxy_name);
+    let proxy_name = _embedded_guard.as_ref().map(|e| e.container_name.as_str());
 
     // Go.
     let inputs = run::RunInputs {
@@ -188,6 +188,7 @@ fn run() -> Result<ExitCode, Error> {
         proxy_url: &proxy_url,
         network: &network,
         container_name: &sandbox_name,
+        proxy_container_name: proxy_name,
         dev_env: cli.dev_env().is_some(),
     };
     let code = run::run(&cli, &state, inputs)?;
