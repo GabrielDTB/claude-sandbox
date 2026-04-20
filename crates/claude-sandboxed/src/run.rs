@@ -21,6 +21,10 @@ pub struct RunInputs<'a> {
     pub proxy_url: &'a str,
     /// `--network` value (pasta with or without -T forwarding).
     pub network: &'a str,
+    /// Deterministic container name (`claude-sandbox-<pid>`). Lets the
+    /// suspend module pause/unpause by name, and the reap module clean
+    /// up leftovers from killed launchers.
+    pub container_name: &'a str,
     /// true when --devenv or --flake was set.
     pub dev_env: bool,
 }
@@ -37,6 +41,11 @@ pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, 
 
     push!("run");
     push!("--rm");
+    // Deterministic per-launcher name — `suspend` pauses/unpauses by
+    // name, and `reap` uses the PID suffix to distinguish killed
+    // siblings from live concurrent sessions.
+    push!("--name");
+    push!(inputs.container_name);
 
     // TTY flags. Match shell: interactive → -it, non-interactive → -i.
     if std::io::stdin().is_terminal() {

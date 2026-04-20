@@ -6,8 +6,9 @@
 //!
 //! Key invariants:
 //! * Container name `claude-auth-proxy-<pid>` — unique per launcher.
-//! * Stale `claude-auth-proxy-*` containers in exited/created state are
-//!   reaped at startup so rootless podman doesn't leak.
+//! * Stale `claude-auth-proxy-*` containers are reaped at startup (see
+//!   [`crate::reap`]) so rootless podman doesn't leak after crashes or
+//!   kills of suspended launchers.
 //! * We wait (up to 2 s) for the host-side port to accept a TCP connect
 //!   before returning — claude requests start immediately after.
 //! * `Drop` captures logs, kills, and removes the container so a panic in
@@ -26,6 +27,9 @@ pub struct Embedded {
     pub proxy_url: String,
     pub network: String,
     pub token: String,
+    /// Podman container name, `claude-auth-proxy-<pid>`. Exposed so the
+    /// suspend module can pause/unpause us alongside the sandbox.
+    pub container_name: String,
     /// RAII handle for the spawned container; drops tear it down.
     #[allow(dead_code)]
     guard: ContainerGuard,
@@ -35,8 +39,6 @@ pub struct Embedded {
 pub fn spawn(state: &State) -> Result<Embedded, crate::Error> {
     let image_path = paths::require("CLAUDE_PROXY_IMAGE_PATH", paths::PROXY_IMAGE_PATH)?;
     images::load_if_needed(image_path, "proxy-loaded")?;
-
-    reap_stale();
 
     let token = mint_token();
     let name = format!("claude-auth-proxy-{}", std::process::id());
@@ -111,6 +113,7 @@ pub fn spawn(state: &State) -> Result<Embedded, crate::Error> {
         proxy_url,
         network,
         token,
+        container_name: name,
         guard,
     })
 }
@@ -134,42 +137,6 @@ fn mint_token() -> String {
     let mut buf = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut buf);
     hex::encode(buf)
-}
-
-/// Clean up `claude-auth-proxy-*` containers left behind by crashed launchers.
-///
-/// Best-effort — ignore errors; if podman is misbehaving the real spawn below
-/// will surface a clearer error message.
-fn reap_stale() {
-    for status in ["exited", "created"] {
-        let out = Command::new("podman")
-            .args([
-                "ps",
-                "-a",
-                "--filter",
-                "name=claude-auth-proxy-",
-                "--filter",
-                &format!("status={status}"),
-                "--format",
-                "{{.Names}}",
-            ])
-            .output();
-        let Ok(out) = out else { continue };
-        if !out.status.success() {
-            continue;
-        }
-        for name in String::from_utf8_lossy(&out.stdout).lines() {
-            let name = name.trim();
-            if name.is_empty() {
-                continue;
-            }
-            let _ = Command::new("podman")
-                .args(["rm", "-f", name])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-        }
-    }
 }
 
 fn query_host_port(name: &str) -> Result<u16, crate::Error> {

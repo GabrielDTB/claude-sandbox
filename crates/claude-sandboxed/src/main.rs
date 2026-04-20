@@ -7,8 +7,10 @@ mod images;
 mod paths;
 mod proxy_embedded;
 mod proxy_external;
+mod reap;
 mod run;
 mod state;
+mod suspend;
 
 use std::process::{Command, ExitCode};
 
@@ -90,6 +92,13 @@ fn run() -> Result<ExitCode, Error> {
         );
     }
 
+    // Reap leftovers from previous launches before any new spawning.
+    // Handles `exited`/`created` unconditionally and `paused` only when
+    // the owning PID is dead — a concurrent launcher suspended with
+    // ctrl+z is the case we must not disturb.
+    reap::reap_stale(reap::SANDBOX_PREFIX);
+    reap::reap_stale(reap::AUTH_PROXY_PREFIX);
+
     let state = state::prepare(&workspace, cli.state_dir.as_deref(), &seed, git_copy)?;
 
     // Snapshot hook-like files in the workspace so the post-run diff can
@@ -166,11 +175,19 @@ fn run() -> Result<ExitCode, Error> {
     // Firewall script.
     firewall::write_script(&state.firewall_script(), carveout.as_deref())?;
 
+    // Wire ctrl+z / `fg` to pause+unpause both containers; see
+    // `suspend` for the mechanism. The name built here MUST match the
+    // `--name` we pass to `podman run` below — suspend pauses by name.
+    let sandbox_name = format!("claude-sandbox-{}", std::process::id());
+    let proxy_name = _embedded_guard.as_ref().map(|e| e.container_name.clone());
+    suspend::install(sandbox_name.clone(), proxy_name);
+
     // Go.
     let inputs = run::RunInputs {
         image_tag,
         proxy_url: &proxy_url,
         network: &network,
+        container_name: &sandbox_name,
         dev_env: cli.dev_env().is_some(),
     };
     let code = run::run(&cli, &state, inputs)?;
