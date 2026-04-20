@@ -148,6 +148,18 @@ pub fn prepare(
         if let Some(t) = &seed.theme {
             obj.insert("theme".into(), serde_json::Value::String(t.clone()));
         }
+        // Pre-accept the per-workspace "Do you trust this folder?" prompt
+        // for the workspace bind-mount path (must match the `-v …:/workspace`
+        // target in run.rs). Inside the sandbox there's nothing to verify
+        // trust against.
+        let mut project = serde_json::Map::new();
+        project.insert(
+            "hasTrustDialogAccepted".into(),
+            serde_json::Value::Bool(true),
+        );
+        let mut projects = serde_json::Map::new();
+        projects.insert("/workspace".into(), serde_json::Value::Object(project));
+        obj.insert("projects".into(), serde_json::Value::Object(projects));
         let mut buf = serde_json::to_vec(&serde_json::Value::Object(obj))?;
         buf.push(b'\n');
         fs::write(&claude_json, buf)?;
@@ -313,6 +325,10 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(s.claude_json()).unwrap()).unwrap();
         assert_eq!(cj["hasCompletedOnboarding"], serde_json::Value::Bool(true));
         assert_eq!(cj["theme"], "dark");
+        assert_eq!(
+            cj["projects"]["/workspace"]["hasTrustDialogAccepted"],
+            serde_json::Value::Bool(true),
+        );
         // `model` lives in settings.json now, not claude.json.
         assert!(cj.get("model").is_none(), "model must not leak into claude.json: {cj}");
 
@@ -456,6 +472,11 @@ mod tests {
         let s = prepare(&ws, Some(&sd), &seed, GitCopyMode::Off).unwrap();
         let body = fs::read_to_string(s.claude_json()).unwrap();
         assert!(body.contains("light"), "existing content clobbered: {body}");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            parsed.get("projects").is_none(),
+            "must not inject projects into an existing claude.json: {body}",
+        );
     }
 
     #[test]
