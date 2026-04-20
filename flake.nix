@@ -2,8 +2,7 @@
   description = "Filesystem-isolated Claude Code agent";
 
   inputs = {
-    # Pinned to a rev with claude-code 2.1.87 (available on npm).
-    nixpkgs.url = "github:NixOS/nixpkgs/7a17139823551e1fb824ccca70540ff99dea0ea2";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   };
 
   outputs =
