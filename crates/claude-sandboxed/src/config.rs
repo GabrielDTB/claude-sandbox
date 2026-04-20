@@ -14,8 +14,10 @@
 //! # ~/.config/claude-sandboxed/config.toml
 //! auth_proxy      = "http://proxy.tailnet.ts.net:28080"
 //! auth_token_file = "/home/me/.config/claude-sandboxed/sandbox-token"
-//! default_model   = "opus"     # seeds `model` in a fresh sandbox's claude.json
+//! default_model   = "opus"     # seeds `model` in a fresh sandbox's settings.json
 //! default_theme   = "dark"     # seeds `theme` in a fresh sandbox's claude.json
+//! permissive      = true       # pass --dangerously-skip-permissions AND seed
+//!                              # skipDangerousModePermissionPrompt=true
 //! ```
 //!
 //! Unknown keys are rejected (deny-unknown-fields) so typos surface as errors
@@ -63,15 +65,21 @@ pub const REFERENCE: &str = "\
 # auth_token_file = \"~/.config/claude-sandboxed/sandbox-token\"
 
 # --- Sandbox seed values ----------------------------------------------------
-# These apply only when a sandbox's claude.json is being bootstrapped for
+# These apply only when a sandbox's config files are being bootstrapped for
 # the first time. Existing sandboxes keep whatever the user set inside
 # (e.g. via /model or /theme).
 
-# Value used to seed `model` in a fresh sandbox's claude.json.
+# Value used to seed `model` in a fresh sandbox's claude/settings.json.
 # default_model = \"opus\"
 
 # Value used to seed `theme` in a fresh sandbox's claude.json.
 # default_theme = \"dark\"
+
+# When true, behaves as if --permissive were passed on every run AND seeds
+# `skipDangerousModePermissionPrompt: true` into a fresh sandbox's
+# claude/settings.json so the \"bypass permissions\" prompt is suppressed
+# durably. Equivalent to --permissive when no CLI flag is given.
+# permissive = true
 
 # --- Git integration --------------------------------------------------------
 # On the first launch of a given sandbox — i.e. when .claude-sandboxed/box-git
@@ -93,13 +101,20 @@ pub struct Config {
     pub auth_proxy: Option<String>,
     /// Default value for `--auth-token-file` / `CLAUDE_SANDBOX_AUTH_TOKEN_FILE`.
     pub auth_token_file: Option<PathBuf>,
-    /// Seed value for `model` in a newly bootstrapped sandbox's `claude.json`.
-    /// Applied only when the per-sandbox `claude.json` is being created fresh;
-    /// existing sandboxes keep whatever `/model` the user picked inside.
+    /// Seed value for `model` in a newly bootstrapped sandbox's
+    /// `claude/settings.json`. Applied only when that file is being created
+    /// fresh; existing sandboxes keep whatever `/model` the user picked
+    /// inside.
     pub default_model: Option<String>,
     /// Seed value for `theme` in a newly bootstrapped sandbox's `claude.json`.
     /// Same "new-sandbox-only" semantics as `default_model`.
     pub default_theme: Option<String>,
+    /// When true, behave as if `--permissive` were passed on every launch
+    /// (Claude Code gets `--dangerously-skip-permissions`) AND seed
+    /// `skipDangerousModePermissionPrompt: true` into a fresh sandbox's
+    /// `claude/settings.json`. The CLI `--permissive` flag keeps working
+    /// independently; this only provides a durable default.
+    pub permissive: Option<bool>,
     /// Copy the host workspace's `.git` into the sandbox's `box-git/` the
     /// first time a sandbox is initialized. Defaults to `true` when unset —
     /// giving the agent a working repo is the expected behavior.
@@ -339,8 +354,16 @@ mod tests {
         assert!(c.auth_token_file.is_none());
         assert!(c.default_model.is_none());
         assert!(c.default_theme.is_none());
+        assert!(c.permissive.is_none());
         assert!(c.copy_git_on_init.is_none());
         assert!(c.copy_git_on_launch.is_none());
+    }
+
+    #[test]
+    fn parses_permissive() {
+        let f = write_config("permissive = true\n");
+        let c = parse_at(f.path()).unwrap();
+        assert_eq!(c.permissive, Some(true));
     }
 
     #[test]

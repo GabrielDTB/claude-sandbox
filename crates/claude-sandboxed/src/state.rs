@@ -2,7 +2,8 @@
 //!
 //! Mirrors the shell block at `package.nix:295-307`: canonicalize the
 //! workspace dir, create/canonicalize the state dir, create the standard
-//! subdirs, bootstrap `claude.json` if missing/empty.
+//! subdirs, bootstrap `claude.json` and `claude/settings.json` if
+//! missing/empty.
 
 use std::fs;
 use std::io;
@@ -32,13 +33,20 @@ pub struct State {
     pub sandbox_dir: PathBuf,
 }
 
-/// Values used only the first time a sandbox's `claude.json` is created.
+/// Values used only the first time a sandbox's config files are created.
 /// Later launches reuse whatever the user set inside the sandbox (e.g.
 /// via `/model` or `/theme`), so these are genuinely "seed" values.
+///
+/// `model` and `permissive` seed `claude/settings.json` (Claude Code's
+/// per-user settings file). `theme` seeds `claude.json` (legacy location
+/// for the onboarding/theme state).
 #[derive(Debug, Default)]
 pub struct Seed {
     pub model: Option<String>,
     pub theme: Option<String>,
+    /// When true, seed `skipDangerousModePermissionPrompt: true` into
+    /// `claude/settings.json` so Claude Code stops prompting on launch.
+    pub permissive: bool,
 }
 
 impl State {
@@ -56,6 +64,9 @@ impl State {
     }
     pub fn claude_json(&self) -> PathBuf {
         self.sandbox_dir.join("claude.json")
+    }
+    pub fn settings_json(&self) -> PathBuf {
+        self.claude_dir().join("settings.json")
     }
     pub fn auth_proxy_log(&self) -> PathBuf {
         self.sandbox_dir.join("auth-proxy.log")
@@ -123,7 +134,7 @@ pub fn prepare(
 
     // `{"hasCompletedOnboarding":true}` short-circuits Claude Code's TOS
     // prompt on the very first launch. Only bootstrap if empty/missing —
-    // existing sandboxes keep whatever the user set via /model, /theme, etc.
+    // existing sandboxes keep whatever the user set via /theme etc.
     let claude_json = state.claude_json();
     let needs_seed = match fs::metadata(&claude_json) {
         Ok(m) => m.len() == 0,
@@ -134,15 +145,38 @@ pub fn prepare(
         // emitted JSON, so the seeded file stays human-readable.
         let mut obj = serde_json::Map::new();
         obj.insert("hasCompletedOnboarding".into(), serde_json::Value::Bool(true));
-        if let Some(m) = &seed.model {
-            obj.insert("model".into(), serde_json::Value::String(m.clone()));
-        }
         if let Some(t) = &seed.theme {
             obj.insert("theme".into(), serde_json::Value::String(t.clone()));
         }
         let mut buf = serde_json::to_vec(&serde_json::Value::Object(obj))?;
         buf.push(b'\n');
         fs::write(&claude_json, buf)?;
+    }
+
+    // Claude Code reads `model` and `skipDangerousModePermissionPrompt`
+    // from `~/.claude/settings.json`, which is the sandbox's
+    // `<sandbox_dir>/claude/settings.json` via the bind mount at
+    // `/home/user/.claude`. Same "missing/empty → seed, otherwise leave
+    // alone" semantics as claude.json above.
+    let settings_json = state.settings_json();
+    let needs_settings_seed = match fs::metadata(&settings_json) {
+        Ok(m) => m.len() == 0,
+        Err(_) => true,
+    };
+    if needs_settings_seed && (seed.model.is_some() || seed.permissive) {
+        let mut obj = serde_json::Map::new();
+        if let Some(m) = &seed.model {
+            obj.insert("model".into(), serde_json::Value::String(m.clone()));
+        }
+        if seed.permissive {
+            obj.insert(
+                "skipDangerousModePermissionPrompt".into(),
+                serde_json::Value::Bool(true),
+            );
+        }
+        let mut buf = serde_json::to_vec(&serde_json::Value::Object(obj))?;
+        buf.push(b'\n');
+        fs::write(&settings_json, buf)?;
     }
 
     Ok(state)
@@ -263,7 +297,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn seed_writes_model_and_theme_when_fresh() {
+    fn seed_writes_theme_to_claude_json_and_model_to_settings_json() {
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path().join("ws");
         fs::create_dir_all(&ws).unwrap();
@@ -271,13 +305,39 @@ mod tests {
         let seed = Seed {
             model: Some("opus".into()),
             theme: Some("dark".into()),
+            permissive: false,
         };
         let s = prepare(&ws, Some(&sd), &seed, GitCopyMode::Off).unwrap();
-        let body = fs::read_to_string(s.claude_json()).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(v["hasCompletedOnboarding"], serde_json::Value::Bool(true));
-        assert_eq!(v["model"], "opus");
-        assert_eq!(v["theme"], "dark");
+
+        let cj: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(s.claude_json()).unwrap()).unwrap();
+        assert_eq!(cj["hasCompletedOnboarding"], serde_json::Value::Bool(true));
+        assert_eq!(cj["theme"], "dark");
+        // `model` lives in settings.json now, not claude.json.
+        assert!(cj.get("model").is_none(), "model must not leak into claude.json: {cj}");
+
+        let sj: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(s.settings_json()).unwrap()).unwrap();
+        assert_eq!(sj["model"], "opus");
+        assert!(sj.get("skipDangerousModePermissionPrompt").is_none());
+    }
+
+    #[test]
+    fn seed_permissive_writes_skip_flag_to_settings_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        fs::create_dir_all(&ws).unwrap();
+        let sd = tmp.path().join("state");
+        let seed = Seed {
+            model: Some("claude-opus-4-7".into()),
+            theme: None,
+            permissive: true,
+        };
+        let s = prepare(&ws, Some(&sd), &seed, GitCopyMode::Off).unwrap();
+        let sj: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(s.settings_json()).unwrap()).unwrap();
+        assert_eq!(sj["model"], "claude-opus-4-7");
+        assert_eq!(sj["skipDangerousModePermissionPrompt"], serde_json::Value::Bool(true));
     }
 
     #[test]
@@ -287,10 +347,12 @@ mod tests {
         fs::create_dir_all(&ws).unwrap();
         let sd = tmp.path().join("state");
         let s = prepare(&ws, Some(&sd), &Seed::default(), GitCopyMode::Off).unwrap();
-        let body = fs::read_to_string(s.claude_json()).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert!(v.get("model").is_none());
-        assert!(v.get("theme").is_none());
+        let cj: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(s.claude_json()).unwrap()).unwrap();
+        assert!(cj.get("model").is_none());
+        assert!(cj.get("theme").is_none());
+        // Nothing to seed → settings.json is not created at all.
+        assert!(!s.settings_json().exists());
     }
 
     /// Build a workspace directory that looks like a real git repo: a
@@ -387,11 +449,35 @@ mod tests {
         fs::create_dir_all(&ws).unwrap();
         let sd = tmp.path().join("state");
         fs::create_dir_all(&sd).unwrap();
-        // Pre-seed an existing sandbox with a user-chosen model.
-        fs::write(sd.join("claude.json"), br#"{"model":"sonnet"}"#).unwrap();
-        let seed = Seed { model: Some("opus".into()), theme: None };
+        // Pre-seed an existing sandbox with a user-chosen theme in the
+        // legacy claude.json location.
+        fs::write(sd.join("claude.json"), br#"{"theme":"light"}"#).unwrap();
+        let seed = Seed { model: None, theme: Some("dark".into()), permissive: false };
         let s = prepare(&ws, Some(&sd), &seed, GitCopyMode::Off).unwrap();
         let body = fs::read_to_string(s.claude_json()).unwrap();
+        assert!(body.contains("light"), "existing content clobbered: {body}");
+    }
+
+    #[test]
+    fn existing_settings_json_is_not_overwritten() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        fs::create_dir_all(&ws).unwrap();
+        let sd = tmp.path().join("state");
+        fs::create_dir_all(sd.join("claude")).unwrap();
+        // Pre-seed an existing sandbox with a user-chosen model.
+        fs::write(sd.join("claude/settings.json"), br#"{"model":"sonnet"}"#).unwrap();
+        let seed = Seed {
+            model: Some("opus".into()),
+            theme: None,
+            permissive: true,
+        };
+        let s = prepare(&ws, Some(&sd), &seed, GitCopyMode::Off).unwrap();
+        let body = fs::read_to_string(s.settings_json()).unwrap();
         assert!(body.contains("sonnet"), "existing content clobbered: {body}");
+        assert!(
+            !body.contains("skipDangerousModePermissionPrompt"),
+            "permissive flag must not retroactively seed an existing settings.json: {body}"
+        );
     }
 }

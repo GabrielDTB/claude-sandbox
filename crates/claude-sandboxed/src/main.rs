@@ -59,6 +59,14 @@ fn run() -> Result<ExitCode, Error> {
     if cli.auth_token_file.is_none() {
         cli.auth_token_file = cfg.auth_token_file;
     }
+    // `permissive` in the config file is a durable default for the CLI flag
+    // of the same name. OR-merge: the flag opts in per-launch, the config
+    // opts in always. The merged value also drives the state seed below, so
+    // turning on permissive in config also persists
+    // `skipDangerousModePermissionPrompt: true` into settings.json.
+    if !cli.permissive {
+        cli.permissive = cfg.permissive.unwrap_or(false);
+    }
     // Git integration mode: CLI flag overrides config entirely; otherwise
     // fall back to the config fields, with built-in defaults (init:on,
     // launch:off) for anything still unset.
@@ -71,6 +79,7 @@ fn run() -> Result<ExitCode, Error> {
     let seed = state::Seed {
         model: cfg.default_model,
         theme: cfg.default_theme,
+        permissive: cli.permissive,
     };
 
     if !has_podman() {
