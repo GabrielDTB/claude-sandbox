@@ -15,11 +15,48 @@ mod privdrop;
 mod server;
 mod token_store;
 
-/// Crate-wide boxed-error alias. Every subcommand returns `Result<u8, Error>`
-/// where `u8` is the process exit code. Errors are printed by `main` and
-/// produce exit code 1 unless a subcommand explicitly returns a different
-/// code (e.g. clap parse errors from within the dispatcher).
-pub type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
+/// Crate-wide error. Every subcommand returns `Result<u8, Error>` where `u8`
+/// is the process exit code. Errors are printed by `main` and produce exit
+/// code 1 unless a subcommand explicitly returns a different code (e.g. clap
+/// parse errors from within the dispatcher).
+///
+/// Most call sites produce an ad-hoc string via `format!(…).into()`; the typed
+/// variants exist so that `?` on raw I/O / JSON / hyper / URL errors converts
+/// without an explicit `map_err`. `Other` catches anything already boxed.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("{0}")]
+    Msg(String),
+
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+
+    #[error(transparent)]
+    Url(#[from] url::ParseError),
+
+    #[error(transparent)]
+    Http(#[from] hyper::http::Error),
+
+    #[error(transparent)]
+    Uri(#[from] hyper::http::uri::InvalidUri),
+
+    #[error(transparent)]
+    HyperClient(#[from] hyper_util::client::legacy::Error),
+
+    #[error(transparent)]
+    Other(#[from] Box<dyn std::error::Error + Send + Sync + 'static>),
+}
+
+impl From<String> for Error {
+    fn from(s: String) -> Self { Error::Msg(s) }
+}
+
+impl From<&str> for Error {
+    fn from(s: &str) -> Self { Error::Msg(s.to_string()) }
+}
 
 use std::process::ExitCode;
 

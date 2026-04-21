@@ -14,7 +14,32 @@ mod state;
 
 use std::process::{Command, ExitCode};
 
-pub type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
+/// Crate-wide error. Most call sites produce an ad-hoc string via `format!(…).into()`;
+/// the remaining typed variants give `?` ergonomics for the handful of concrete error
+/// kinds that bubble up unwrapped (I/O, JSON parse) and a catchall `Other` for anything
+/// pre-boxed (e.g. errors returned from dependencies that we've already wrapped).
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("{0}")]
+    Msg(String),
+
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+
+    #[error(transparent)]
+    Other(#[from] Box<dyn std::error::Error + Send + Sync + 'static>),
+}
+
+impl From<String> for Error {
+    fn from(s: String) -> Self { Error::Msg(s) }
+}
+
+impl From<&str> for Error {
+    fn from(s: &str) -> Self { Error::Msg(s.to_string()) }
+}
 
 fn main() -> ExitCode {
     match run() {

@@ -19,7 +19,6 @@
 //! long enough to swap the cache dict.
 
 use std::{
-    ffi::CString,
     fs,
     io::{self, Read, Write},
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
@@ -364,27 +363,18 @@ fn mtime_nanos(path: &Path) -> Option<i128> {
 }
 
 fn format_local_time(ts: i64) -> String {
-    // Avoid a chrono dep: format using `strftime(3)` via libc.
-    let tt: libc::time_t = ts as libc::time_t;
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    let ok = unsafe { libc::localtime_r(&tt, &mut tm) };
-    if ok.is_null() {
-        return ts.to_string();
+    // `chrono::Local` handles tz lookup and strftime-style formatting without
+    // any unsafe blocks. Fall back to the raw unix timestamp if the value is
+    // outside chrono's representable range (impossible in practice for an
+    // i64 coming out of `SystemTime::now()`, but we keep the guard for parity
+    // with the previous implementation).
+    match chrono::DateTime::from_timestamp(ts, 0) {
+        Some(dt) => dt
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string(),
+        None => ts.to_string(),
     }
-    let fmt = CString::new("%Y-%m-%d %H:%M:%S").unwrap();
-    let mut buf = [0u8; 32];
-    let n = unsafe {
-        libc::strftime(
-            buf.as_mut_ptr() as *mut libc::c_char,
-            buf.len(),
-            fmt.as_ptr(),
-            &tm,
-        )
-    };
-    if n == 0 {
-        return ts.to_string();
-    }
-    String::from_utf8_lossy(&buf[..n]).into_owned()
 }
 
 // ---------------------------------------------------------------------------

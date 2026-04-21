@@ -55,6 +55,16 @@ rand = "0.8"
 base64 = "0.22"
 url = "2"
 
+# OAuth2 types (PKCE + CSRF) and local-time formatting. `oauth2` is pulled
+# in with no HTTP features — we use only the primitive types and run the
+# token exchange over our existing hyper+rustls client. `chrono` is clock-
+# only so it doesn't drag in serde / iana-time-zone / wasm shims.
+oauth2 = { version = "4", default-features = false }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# Structured errors.
+thiserror = "1"
+
 # POSIX glue: setuid/setgid/setgroups, flock, getpwnam/getgrnam via libc.
 nix = { version = "0.29", features = ["user", "fs"] }
 libc = "0.2"
