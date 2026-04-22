@@ -37,8 +37,8 @@ let
   # production launcher (crates/claude-sandboxed) builds its own argv in Rust.
   #
   # Shell variables that must be set by the caller:
-  #   BOX_DIR            — host path to the agent's project directory (box/)
-  #   SANDBOX_DIR        — host path to .claude-sandbox/
+  #   BOX_DIR            — host path to the agent's workspace directory
+  #   SANDBOX_DIR        — host path to .claude-sandboxed/
   #   WORKSPACE          — container-side workspace path (/workspace/<name>)
   #   SANDBOX_NETWORK    — value for podman --network (controls pasta forwarding)
   #   SANDBOX_PROXY_URL  — value of ANTHROPIC_BASE_URL inside the sandbox

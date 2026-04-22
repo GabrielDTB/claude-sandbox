@@ -1,12 +1,13 @@
-//! clap-derive CLI surface. Mirrors `auth-proxy.py`'s argparse tree with
-//! two intentional cleanups (see plan): `mint` / `list` / `revoke` no longer
-//! accept the vestigial `--creds` hint flag — creds path is always auto-
-//! discovered from config/env when needed.
+//! clap-derive CLI surface for `claude-proxy`.
 //!
-//! Root-privilege handling is centralised here: subcommands tagged
-//! `requires_root` go through `privdrop::enforce_root_and_drop` before their
-//! body runs, so the body always executes as the service user on a managed
-//! install and as the invoking user in dev.
+//! `mint` / `list` / `revoke` do not accept a `--creds` flag — the creds
+//! path is only meaningful to `serve` / `login` and is auto-discovered
+//! from config/env everywhere else.
+//!
+//! Root-privilege handling is centralised here: state-mutating subcommands
+//! go through `privdrop::enforce_root_and_drop` before their body runs, so
+//! the body always executes as the service user on a managed install and
+//! as the invoking user in dev.
 
 use std::path::PathBuf;
 

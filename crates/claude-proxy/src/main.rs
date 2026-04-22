@@ -1,9 +1,9 @@
 //! `claude-proxy` — OAuth forwarding proxy for sandboxed Claude Code.
 //!
-//! See the crate-level README / `auth-proxy.py` docstring in git history for
-//! the threat model. This binary is the network-facing component that holds
-//! the real Anthropic OAuth bearer; the sandbox authenticates to *us* with a
-//! minted revocable token that we validate by sha256-hash lookup, then strip
+//! See the top-level `README.md` and `HARDENING.md` for the threat model.
+//! This binary is the network-facing component that holds the real
+//! Anthropic OAuth bearer; the sandbox authenticates to *us* with a minted
+//! revocable token that we validate by sha256-hash lookup, then strip
 //! before forwarding to `api.anthropic.com`.
 
 mod cli;

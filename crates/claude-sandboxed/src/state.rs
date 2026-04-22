@@ -1,9 +1,8 @@
 //! Sandbox state-directory preparation.
 //!
-//! Mirrors the shell block at `package.nix:295-307`: canonicalize the
-//! workspace dir, create/canonicalize the state dir, create the standard
-//! subdirs, bootstrap `claude.json` and `claude/settings.json` if
-//! missing/empty.
+//! Canonicalize the workspace dir, create/canonicalize the state dir,
+//! create the standard subdirs, and bootstrap `claude.json` /
+//! `claude/settings.json` when they are missing or empty.
 
 use std::fs;
 use std::io;

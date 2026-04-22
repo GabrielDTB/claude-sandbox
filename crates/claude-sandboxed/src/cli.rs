@@ -1,5 +1,4 @@
-//! Command-line surface. Mirrors the shell `usage()` at `package.nix:211-232`
-//! so existing invocations keep working.
+//! Command-line surface for the `claude-sandboxed` launcher.
 
 use clap::Parser;
 use std::path::PathBuf;

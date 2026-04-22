@@ -1,6 +1,5 @@
 //! External auth-proxy mode (`--auth-proxy URL --auth-token-file PATH`).
 //!
-//! Replaces the inline `python3 -c` URL parser at `package.nix:453-464`.
 //! We parse the URL with `url::Url`, resolve the hostname to an IPv4 on
 //! the host side, and emit an nft carveout rule so a Tailscale/RFC1918
 //! proxy IP isn't rejected by the LAN-block rules.
@@ -50,8 +49,9 @@ fn load_token(path: &Path) -> Result<String, crate::Error> {
 
 /// Parse + DNS-resolve. Returns `(scheme, ip_literal, port)`.
 ///
-/// Matches the shell/python behavior: pick the first IPv4 the resolver
-/// returns (the shell used `socket.gethostbyname`, which is IPv4-only).
+/// Picks the first IPv4 the resolver returns — the nft carveout we emit
+/// is IPv4-scoped, so handing back a v6 address would land in the LAN
+/// reject block and fail to match.
 fn resolve(raw: &str) -> Result<(&'static str, std::net::IpAddr, u16), crate::Error> {
     let parsed = url::Url::parse(raw)
         .map_err(|e| -> crate::Error { format!("invalid URL {raw:?}: {e}").into() })?;
@@ -78,9 +78,9 @@ fn resolve(raw: &str) -> Result<(&'static str, std::net::IpAddr, u16), crate::Er
     Ok((scheme, addr.ip(), addr.port()))
 }
 
-/// Auth-proxy port to use when the URL doesn't specify one — matches the
-/// shell fallback (`80` for http, `443` for https) but also lets a caller
-/// reference the default sandbox port.
+/// Default sandbox-side auth-proxy port. Exposed for callers that want to
+/// reference it by symbol rather than hard-coding the number; URL-derived
+/// ports fall back to the scheme default (80 / 443) inside `resolve`.
 #[allow(dead_code)]
 pub const DEFAULT_PORT: u16 = paths::AUTH_PROXY_PORT;
 

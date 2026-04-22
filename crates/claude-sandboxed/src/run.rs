@@ -1,9 +1,8 @@
 //! Build and execute the main `podman run` for the sandbox container.
 //!
-//! Mirrors `mkPodmanRun` (package.nix:42-123) + the invocation site at
-//! lines 604-614, composed with the launcher's state. Uses in-container
-//! FHS paths (`/bin/bash`, `/bin/claude`) — those symlinks exist in the
-//! image via `buildEnv`, no need to thread Nix store paths through.
+//! Uses in-container FHS paths (`/bin/bash`, `/bin/claude`) — those
+//! symlinks exist in the image via `buildEnv`, so there's no need to
+//! thread Nix store paths through from the host.
 
 use std::ffi::OsString;
 use std::io::IsTerminal;
@@ -52,7 +51,7 @@ pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, 
     push!("--name");
     push!(inputs.container_name);
 
-    // TTY flags. Match shell: interactive → -it, non-interactive → -i.
+    // TTY flags: interactive → -it, non-interactive → -i.
     if std::io::stdin().is_terminal() {
         push!("-it");
     } else {
@@ -148,7 +147,7 @@ pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, 
     // above (written by main.rs before launch) — no separate mount needed.
     // It's writable by the sandbox and overwritten on the next launch.
 
-    // claude.json (only if present — shell: `[ -f "$SANDBOX_DIR/claude.json" ]`).
+    // claude.json: mounted only if it already exists on the host side.
     let claude_json = state.claude_json();
     if claude_json.is_file() {
         push!("-v");

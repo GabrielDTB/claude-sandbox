@@ -2,7 +2,7 @@
 //!
 //! For the default (no `--auth-proxy`) case, we spawn a per-sandbox
 //! `claude-auth-proxy` container, wire it to the sandbox via pasta port
-//! forwarding, and tear it down on exit. Mirrors `package.nix:491-533`.
+//! forwarding, and tear it down on exit.
 //!
 //! Key invariants:
 //! * Container name `claude-auth-proxy-<pid>` — unique per launcher.
@@ -98,7 +98,7 @@ pub fn spawn(state: &State) -> Result<Embedded, crate::Error> {
         log_path: log_path.clone(),
     };
 
-    // Discover the host-side published port (shell: `podman port $NAME $PORT | cut -d: -f2`).
+    // Discover the host-side published port (`podman port $NAME $PORT` returns `HOST:PORT`).
     let host_port = query_host_port(&name)?;
 
     // Wait for the proxy to accept connections. Shell tried 20 × 0.1s.
@@ -195,7 +195,7 @@ struct ContainerGuard {
 
 impl Drop for ContainerGuard {
     fn drop(&mut self) {
-        // Append the final logs before killing — shell: `podman logs NAME >> log`.
+        // Append the final logs before killing, so crashes leave a trail.
         if let Ok(mut log) = std::fs::OpenOptions::new().append(true).open(&self.log_path) {
             if let Ok(out) = Command::new("podman")
                 .args(["logs", &self.name])

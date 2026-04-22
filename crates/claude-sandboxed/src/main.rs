@@ -270,8 +270,8 @@ fn has_podman() -> bool {
 }
 
 /// Write the stub `.credentials.json` at `path`, overwriting any existing
-/// file. The JSON shape is copied verbatim from `package.nix:487` — Claude
-/// Code expects every key.
+/// file. Claude Code expects every key in the JSON shape below — missing
+/// fields cause it to reject the creds file on load.
 ///
 /// A prior run's in-container claude may have left a file here owned by
 /// an unmapped subuid (shows up as e.g. `0:100000` on the host). We own

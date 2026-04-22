@@ -1,7 +1,7 @@
 //! Pre-/post-launch detection of hook-like additions to the workspace.
 //!
-//! Defense in depth for the `box/` mount: the sandbox can write to any file
-//! in the workspace, and certain names (`.githooks/pre-commit`, `.husky/...`,
+//! Defense in depth for the workspace mount: the sandbox can write to any
+//! file in the workspace, and certain names (`.githooks/pre-commit`, `.husky/...`,
 //! `.pre-commit-config.yaml`) will execute on the host the next time the
 //! user runs git in the workspace. We can't prevent the writes, but we can
 //! snapshot hook state before launch and diff after, then print a clear

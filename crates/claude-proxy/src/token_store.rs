@@ -98,8 +98,9 @@ impl LockedFile {
             }
         }
         // Race-safe init: O_CREAT without O_EXCL, then flock, then check size
-        // under lock and init empty store if file is brand new. Matches
-        // auth-proxy.py:_open_for_lock.
+        // under lock and init an empty store if the file is brand new. Two
+        // concurrent `mint`s on a fresh install would otherwise race between
+        // "file exists, size 0" and "file exists, size N".
         let file = fs::OpenOptions::new()
             .read(true)
             .write(true)

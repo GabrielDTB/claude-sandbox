@@ -1,6 +1,4 @@
-//! `--devenv` / `--flake` dev-environment capture.
-//!
-//! Replaces the shell block at `package.nix:319-423`. The flow:
+//! `--devenv` / `--flake` dev-environment capture. The flow:
 //!   1. Compute a composite hash of the inputs (lockfiles, flake.nix, and
 //!      — for devenv — the realpath of `.devenv/profile`, since that
 //!      symlink rewrites when devenv rebuilds after a new package).
@@ -22,15 +20,15 @@ use std::process::{Command, Stdio};
 use crate::cli::DevEnv;
 use crate::state::State;
 
-/// Variables the shell strips from the devenv-captured env before mounting
-/// it into the sandbox — they're either host-specific or container-managed.
-/// Verbatim from `package.nix:399`.
+/// Variables stripped from the devenv-captured env before mounting it
+/// into the sandbox — they're either host-specific or container-managed.
 const DROP_VARS: &[&str] = &[
     "HOME", "USER", "TMPDIR", "SHELL", "SHLVL", "PWD", "OLDPWD", "_", "LOGNAME", "HOSTNAME",
 ];
 
-/// Runtime entrypoint written into the container. Sources the dev env before
-/// exec'ing the child. Verbatim content from `package.nix:413-422`.
+/// Runtime entrypoint written into the container. Sources the dev env
+/// before exec'ing the child. Kept here (not in a separate file) because
+/// the content is short and tightly coupled to the capture logic above.
 const DEV_ENTRYPOINT: &str = "\
 #!/bin/bash
 BASE_PATH=\"$PATH\"

@@ -6,9 +6,10 @@
 //! + CAP_SETPCAP via an inline Python `ctypes` block — by this point the
 //!   admin caps have been used, so we drop them before exec'ing claude.
 //!
-//! The nftables rules + cap-drop Python are copied **verbatim** from the
-//! shell source at `package.nix:552-591`. Neither is re-derived here — any
-//! drift is a behavioral regression.
+//! The nftables rules and the cap-drop Python block below are load-bearing
+//! for the sandbox's threat model (see `HARDENING.md` — network isolation
+//! and the `NET_ADMIN` / `SETPCAP` drop). Any change here is a behavioral
+//! change; `test-redteam.sh` exercises both.
 
 use std::fs;
 use std::io::Write;
