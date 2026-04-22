@@ -86,6 +86,9 @@ fn run() -> Result<ExitCode, Error> {
     if cli.auth_token_file.is_none() {
         cli.auth_token_file = cfg.auth_token_file;
     }
+    if cli.cgroup_parent.is_none() {
+        cli.cgroup_parent = cfg.cgroup_parent;
+    }
     // `permissive` in the config file is a durable default for the CLI flag
     // of the same name. OR-merge: the flag opts in per-launch, the config
     // opts in always. The merged value also drives the state seed below, so

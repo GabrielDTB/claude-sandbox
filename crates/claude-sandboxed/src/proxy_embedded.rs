@@ -67,6 +67,8 @@ pub fn spawn(state: &State) -> Result<Embedded, crate::Error> {
             "64",
             "--memory",
             "256m",
+            "--memory-swap",
+            "256m",
             "-p",
             &port_arg,
             "-v",

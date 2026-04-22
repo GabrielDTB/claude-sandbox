@@ -52,6 +52,20 @@ pub struct Cli {
     #[arg(long, value_name = "N")]
     pub memory: Option<String>,
 
+    /// Place the container under this cgroup parent (e.g. a systemd slice).
+    ///
+    /// When unset, the launcher auto-enrolls into the slice named in
+    /// `/etc/claude-sandboxed/slice` (written by the NixOS module when
+    /// `programs.claude-sandboxed.sharedLimit` is enabled), falling back
+    /// to `claude-sandboxed.slice` when that file is absent. Pass a value
+    /// here only to override that auto-discovered default.
+    #[arg(
+        long = "cgroup-parent",
+        value_name = "SLICE",
+        env = "CLAUDE_SANDBOX_CGROUP_PARENT"
+    )]
+    pub cgroup_parent: Option<String>,
+
     /// Pass through GPU devices (requires nvidia-container-toolkit)
     #[arg(long)]
     pub gpu: bool,

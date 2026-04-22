@@ -44,9 +44,12 @@
       nixosModules.default =
         { pkgs, lib, ... }:
         {
-          imports = [ ./module.nix ];
+          imports = [ ./module.nix ./sandbox-module.nix ];
           services.claude-proxy.package = lib.mkDefault (
             self.packages.${pkgs.stdenv.hostPlatform.system}.proxy
+          );
+          programs.claude-sandboxed.package = lib.mkDefault (
+            self.packages.${pkgs.stdenv.hostPlatform.system}.default
           );
         };
     };

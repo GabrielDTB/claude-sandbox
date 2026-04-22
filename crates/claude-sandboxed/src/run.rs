@@ -98,7 +98,15 @@ pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, 
         .or_else(|| std::env::var("MEMORY_LIMIT").ok())
         .unwrap_or_else(|| "0".into());
     push!("--memory");
-    args.push(OsString::from(memory));
+    args.push(OsString::from(&memory));
+    // Unify RAM + swap under the same cap. Without --memory-swap, podman lets
+    // the container use an additional `--memory` worth of swap (total 2x).
+    // Setting --memory-swap equal to --memory disables extra swap. Skip when
+    // memory is "0" (unlimited) — --memory-swap is only meaningful with a cap.
+    if memory != "0" {
+        push!("--memory-swap");
+        args.push(OsString::from(&memory));
+    }
     let cpus = cli
         .cpus
         .clone()
@@ -106,6 +114,15 @@ pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, 
         .unwrap_or_else(|| "0".into());
     push!("--cpus");
     args.push(OsString::from(cpus));
+
+    // Shared-resource slice. Explicit override wins; otherwise probe for the
+    // well-known user slice that `programs.claude-sandboxed.sharedLimit`
+    // creates on NixOS. Enabling the option thus auto-enrolls every launch
+    // into the shared cap with no per-launch config needed.
+    if let Some(parent) = cli.cgroup_parent.clone().or_else(discover_shared_slice) {
+        push!("--cgroup-parent");
+        args.push(OsString::from(parent));
+    }
 
     // Base bind mounts.
     let ws_arg = format!("{}:/workspace", state.box_dir.display());
@@ -235,6 +252,44 @@ pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, 
     // falls back to a direct spawn when stdin isn't a tty. It also
     // restores the host termios and resets SGR/cursor on the way out.
     pty::run(&args, inputs.container_name, inputs.proxy_container_name)
+}
+
+/// Probe for the shared-limit user slice. The NixOS module writes the
+/// configured unit name to `/etc/claude-sandboxed/slice`; when that file
+/// is absent we fall back to the `claude-sandboxed.slice` default (which
+/// still matches a hand-rolled `~/.config/systemd/user/…` unit of that
+/// name). Either way we verify the slice is actually loaded via
+/// `systemctl --user show` before returning it.
+///
+/// Never errors — missing file, missing systemctl, missing slice all
+/// collapse to `None`, and the launcher proceeds with per-container
+/// limits only.
+fn discover_shared_slice() -> Option<String> {
+    const DEFAULT: &str = "claude-sandboxed.slice";
+    const CONFIGURED: &str = "/etc/claude-sandboxed/slice";
+
+    let slice = match std::fs::read_to_string(CONFIGURED) {
+        Ok(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                DEFAULT.to_string()
+            } else {
+                trimmed.to_string()
+            }
+        }
+        Err(_) => DEFAULT.to_string(),
+    };
+
+    let out = std::process::Command::new("systemctl")
+        .args(["--user", "show", &slice, "--property=LoadState", "--value"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let state = std::str::from_utf8(&out.stdout).ok()?.trim();
+    (state == "loaded").then_some(slice)
 }
 
 fn gh_token() -> Result<Option<String>, crate::Error> {

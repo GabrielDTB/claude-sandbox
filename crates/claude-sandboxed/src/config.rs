@@ -92,6 +92,20 @@ pub const REFERENCE: &str = "\
 # whatever the sandbox did to its own repo. Implies copy_git_on_init.
 # Equivalent to passing --copy-git on every run.
 # copy_git_on_launch = false
+
+# --- Resource limits --------------------------------------------------------
+
+# Podman --cgroup-parent for the sandbox container. Use a systemd slice to
+# share a single resource cap across every running sandbox (configure the
+# slice via the NixOS option programs.claude-sandboxed.sharedLimit, or with
+# a hand-rolled ~/.config/systemd/user/claude-sandboxed.slice unit).
+#
+# When unset, the launcher auto-enrolls into the slice named in
+# /etc/claude-sandboxed/slice (written by the NixOS module), falling back
+# to `claude-sandboxed.slice` when that file is absent. Set this field
+# only to override that auto-discovered default.
+# Equivalent to --cgroup-parent / $CLAUDE_SANDBOX_CGROUP_PARENT.
+# cgroup_parent = \"claude-sandboxed.slice\"
 ";
 
 #[derive(Debug, Default, Deserialize)]
@@ -123,6 +137,11 @@ pub struct Config {
     /// whatever the sandbox did to its own repo copy. Defaults to `false`.
     /// Implies `copy_git_on_init`.
     pub copy_git_on_launch: Option<bool>,
+    /// Default value for `--cgroup-parent` / `CLAUDE_SANDBOX_CGROUP_PARENT`.
+    /// Names a systemd slice (or other cgroup) that the podman container
+    /// will be placed under. When unset, the launcher auto-discovers a
+    /// user slice named `claude-sandboxed.slice` if one exists.
+    pub cgroup_parent: Option<String>,
 }
 
 /// Resolve the config path, preferring `$XDG_CONFIG_HOME` then
@@ -357,6 +376,7 @@ mod tests {
         assert!(c.permissive.is_none());
         assert!(c.copy_git_on_init.is_none());
         assert!(c.copy_git_on_launch.is_none());
+        assert!(c.cgroup_parent.is_none());
     }
 
     #[test]
