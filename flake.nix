@@ -52,5 +52,19 @@
             self.packages.${pkgs.stdenv.hostPlatform.system}.default
           );
         };
+
+      # Home-manager module: installs claude-sandboxed into the user
+      # profile and renders ~/.config/claude-sandboxed/config.toml from
+      # typed options. Complements the NixOS module (which handles the
+      # system-wide package + shared-limit slice) — users who manage
+      # their shell with home-manager can layer this on top.
+      homeManagerModules.default =
+        { pkgs, lib, ... }:
+        {
+          imports = [ ./home-module.nix ];
+          programs.claude-sandboxed.package = lib.mkDefault (
+            self.packages.${pkgs.stdenv.hostPlatform.system}.default
+          );
+        };
     };
 }
