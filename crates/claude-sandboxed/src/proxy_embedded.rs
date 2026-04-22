@@ -19,6 +19,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use crate::constants::{
+    AUTH_PROXY_CONTAINER_PREFIX, AUTH_PROXY_MEMORY, AUTH_PROXY_PIDS_LIMIT,
+};
 use crate::images;
 use crate::paths;
 use crate::state::State;
@@ -41,7 +44,7 @@ pub fn spawn(state: &State) -> Result<Embedded, crate::Error> {
     images::load_if_needed(image_path, "proxy-loaded")?;
 
     let token = mint_token();
-    let name = format!("claude-auth-proxy-{}", std::process::id());
+    let name = format!("{AUTH_PROXY_CONTAINER_PREFIX}{}", std::process::id());
     let creds_host = resolve_creds()?;
     let log_path = state.auth_proxy_log();
 
@@ -49,6 +52,7 @@ pub fn spawn(state: &State) -> Result<Embedded, crate::Error> {
     let bind_arg = format!("0.0.0.0:{}", paths::AUTH_PROXY_PORT);
     let creds_vol = format!("{}:/credentials.json:rw", creds_host.display());
     let initial_env = format!("INITIAL_TOKEN={token}");
+    let pids_limit = AUTH_PROXY_PIDS_LIMIT.to_string();
 
     // stderr -> auth-proxy.log (truncate per launch, matches shell `>log`).
     let log_file = std::fs::File::create(&log_path)?;
@@ -64,11 +68,11 @@ pub fn spawn(state: &State) -> Result<Embedded, crate::Error> {
             "--security-opt",
             "no-new-privileges",
             "--pids-limit",
-            "64",
+            &pids_limit,
             "--memory",
-            "256m",
+            AUTH_PROXY_MEMORY,
             "--memory-swap",
-            "256m",
+            AUTH_PROXY_MEMORY,
             "-p",
             &port_arg,
             "-v",

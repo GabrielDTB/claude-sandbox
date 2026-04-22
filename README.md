@@ -199,28 +199,26 @@ Short-circuits before any filesystem or podman work, so it runs fine in environm
 
 ## User config file
 
-Location: `$XDG_CONFIG_HOME/claude-sandboxed/config.toml`, falling back to `$HOME/.config/claude-sandboxed/config.toml`. A missing file is not an error; a malformed one is.
+Location: `$XDG_CONFIG_HOME/claude-sandboxed/config.toml`, falling back to `$HOME/.config/claude-sandboxed/config.toml`. A missing file is not an error; a malformed one is. All fields are optional; unknown keys are rejected (`deny_unknown_fields`) so typos fail loudly. Precedence for any option that also exists on the CLI: **flag > env > config > built-in default**.
 
-Schema (all fields optional, `deny_unknown_fields` so typos are hard errors):
+The authoritative, always-up-to-date schema is printed by the launcher itself. Bootstrap a fresh config with:
 
-```toml
-# Auth proxy
-auth_proxy      = "http://proxy.tailnet.ts.net:18080"
-auth_token_file = "~/.config/claude-sandboxed/sandbox-token"
-
-# Sandbox seed values — applied only when the sandbox's config files
-# are being created fresh. Existing sandboxes keep the user's choices.
-default_model   = "opus"
-default_theme   = "dark"
-permissive      = true       # behave as if --permissive were passed every run
-
-# Git integration (see below)
-copy_git_on_init   = true    # default: true
-copy_git_on_launch = false   # default: false
-
-# Resource limits
-cgroup_parent      = "claude-sandboxed.slice"
+```sh
+claude-sandboxed --print-default-config > ~/.config/claude-sandboxed/config.toml
 ```
+
+Every example line in the output is commented out, so piping it into place is a no-op until you uncomment the fields you want.
+
+Keys (see `--print-default-config` for the full annotations):
+
+- `auth_proxy` — URL of an external auth proxy. Equivalent to `--auth-proxy` / `$CLAUDE_SANDBOX_AUTH_PROXY`.
+- `auth_token_file` — path to the sandbox bearer token for `auth_proxy`. Equivalent to `--auth-token-file` / `$CLAUDE_SANDBOX_AUTH_TOKEN_FILE`.
+- `default_model` — seed value for `model` in a fresh sandbox's `claude/settings.json`. First-launch only.
+- `default_theme` — seed value for `theme` in a fresh sandbox's `claude.json`. First-launch only.
+- `permissive` — durable default for `--permissive`; also seeds `skipDangerousModePermissionPrompt: true` on first launch.
+- `copy_git_on_init` — copy host `.git` into `box-git/` on first launch (default: `true`). See [Git integration](#git-integration).
+- `copy_git_on_launch` — re-copy host `.git` into `box-git/` on every launch (default: `false`).
+- `cgroup_parent` — default value for `--cgroup-parent` / `$CLAUDE_SANDBOX_CGROUP_PARENT`.
 
 Path fields (`auth_token_file`) support `~` / `~/…` expansion; other relative paths resolve against the config file's own directory (Cargo.toml-style). `~user` (other users' homes) is not supported.
 
@@ -451,7 +449,9 @@ crates/
 │       ├── hookscan.rs                # hook snapshot + verify
 │       ├── images.rs                  # marker-cached `podman load`
 │       ├── paths.rs                   # Nix-baked store paths via option_env!
-│       └── reap.rs                    # stale container reaper
+│       ├── reap.rs                    # stale container reaper
+│       ├── constants.rs               # centralised podman args (pids, mem, DNS, prefixes)
+│       └── doc_drift.rs               # README-vs-code drift tests (cfg(test))
 └── claude-proxy/                      # auth-proxy binary
     └── src/
         ├── main.rs                    # tokio runtime + entrypoint

@@ -1,0 +1,69 @@
+# CI for claude-sandboxed.
+#
+# Scope: fast, hermetic checks that run on every PR.
+#   - Rust fmt / clippy / tests for the workspace (both crates).
+#   - `nix flake check` to catch flake-level drift.
+#
+# Explicitly NOT run here:
+#   - test-sandbox.sh / test-redteam.sh: these need a loaded podman image
+#     plus rootless podman with pasta networking, which GitHub-hosted
+#     runners don't reliably support. Run them locally or on a self-hosted
+#     runner if/when one exists.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-tests:
+    name: Rust (fmt / clippy / test)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      # NOTE: existing code doesn't pass `cargo fmt --check`; tightening this
+      # up is out of scope for this PR. Marked continue-on-error so drift is
+      # visible in the CI summary without blocking merges. Flip to a hard
+      # failure after a one-shot `cargo fmt --all` cleanup lands.
+      - name: cargo fmt --check
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+  nix-flake-check:
+    name: nix flake check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: nix flake check
+        run: nix flake check --accept-flake-config

@@ -12,7 +12,7 @@
 //!
 //! ```toml
 //! # ~/.config/claude-sandboxed/config.toml
-//! auth_proxy      = "http://proxy.tailnet.ts.net:28080"
+//! auth_proxy      = "http://proxy.tailnet.ts.net:18080"
 //! auth_token_file = "/home/me/.config/claude-sandboxed/sandbox-token"
 //! default_model   = "opus"     # seeds `model` in a fresh sandbox's settings.json
 //! default_theme   = "dark"     # seeds `theme` in a fresh sandbox's claude.json
@@ -57,7 +57,7 @@ pub const REFERENCE: &str = "\
 
 # URL of an external auth proxy to route Claude API traffic through.
 # Equivalent to --auth-proxy / $CLAUDE_SANDBOX_AUTH_PROXY.
-# auth_proxy = \"http://proxy.tailnet.ts.net:28080\"
+# auth_proxy = \"http://proxy.tailnet.ts.net:18080\"
 
 # Path to the file containing the sandbox bearer token for the external
 # proxy. Required whenever `auth_proxy` is set.

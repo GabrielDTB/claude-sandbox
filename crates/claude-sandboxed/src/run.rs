@@ -9,6 +9,7 @@ use std::io::IsTerminal;
 use std::process::ExitCode;
 
 use crate::cli::Cli;
+use crate::constants::{PUBLIC_DNS, SANDBOX_PIDS_LIMIT_DEFAULT};
 use crate::paths;
 use crate::pty;
 use crate::state::State;
@@ -70,12 +71,10 @@ pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, 
     push!("/home/user:rw,nosuid,nodev,mode=0777");
     push!("--network");
     push!(inputs.network);
-    push!("--dns");
-    push!("1.1.1.1");
-    push!("--dns");
-    push!("1.0.0.1");
-    push!("--dns");
-    push!("8.8.8.8");
+    for dns in PUBLIC_DNS {
+        push!("--dns");
+        push!(*dns);
+    }
     push!("--dns-search");
     push!(".");
     push!("--cap-add=NET_ADMIN");
@@ -88,7 +87,8 @@ pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, 
     push!("mask=/proc/version:/proc/cmdline:/proc/mounts");
 
     // Resource limits — honor env overrides, else unlimited/default.
-    let pids = std::env::var("PIDS_LIMIT").unwrap_or_else(|_| "4096".into());
+    let pids = std::env::var("PIDS_LIMIT")
+        .unwrap_or_else(|_| SANDBOX_PIDS_LIMIT_DEFAULT.to_string());
     push!("--pids-limit");
     args.push(OsString::from(pids));
     let memory = cli

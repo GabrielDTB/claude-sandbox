@@ -1,6 +1,9 @@
 mod cli;
 mod config;
+mod constants;
 mod devenv;
+#[cfg(test)]
+mod doc_drift;
 mod firewall;
 mod hookscan;
 mod images;
@@ -124,8 +127,8 @@ fn run() -> Result<ExitCode, Error> {
     // Handles `exited`/`created` unconditionally and `paused` only when
     // the owning PID is dead — a concurrent launcher suspended with
     // ctrl+z is the case we must not disturb.
-    reap::reap_stale(reap::SANDBOX_PREFIX);
-    reap::reap_stale(reap::AUTH_PROXY_PREFIX);
+    reap::reap_stale(constants::SANDBOX_CONTAINER_PREFIX);
+    reap::reap_stale(constants::AUTH_PROXY_CONTAINER_PREFIX);
 
     let state = state::prepare(&workspace, cli.state_dir.as_deref(), &seed, git_copy)?;
 
@@ -207,7 +210,11 @@ fn run() -> Result<ExitCode, Error> {
     // `reap` uses the PID suffix to distinguish killed siblings from
     // live concurrent sessions. Must match the `--name` the run module
     // passes to `podman run`.
-    let sandbox_name = format!("claude-sandbox-{}", std::process::id());
+    let sandbox_name = format!(
+        "{prefix}{pid}",
+        prefix = constants::SANDBOX_CONTAINER_PREFIX,
+        pid = std::process::id()
+    );
     let proxy_name = _embedded_guard.as_ref().map(|e| e.container_name.as_str());
 
     // Go.

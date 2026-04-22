@@ -20,12 +20,8 @@
 
 use std::process::{Command, Stdio};
 
-/// Name prefix for sandbox containers (trailing `-` included so that the
-/// PID suffix is captured cleanly by [`owning_pid`]).
-pub const SANDBOX_PREFIX: &str = "claude-sandbox-";
-
-/// Name prefix for auth-proxy containers.
-pub const AUTH_PROXY_PREFIX: &str = "claude-auth-proxy-";
+// Container-name prefixes live in `crate::constants`
+// (`SANDBOX_CONTAINER_PREFIX`, `AUTH_PROXY_CONTAINER_PREFIX`).
 
 /// Remove stale containers whose names start with `prefix`. See module
 /// docs for the status-by-status policy.
