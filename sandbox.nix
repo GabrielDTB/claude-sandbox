@@ -38,7 +38,14 @@ rustPlatform.buildRustPackage {
         base == "target"
         || base == "result"
         || base == ".direnv"
-        || lib.hasSuffix ".md" base
+        # README.md and HARDENING.md are required at build time by doc-drift
+        # tests: crates/claude-sandboxed/src/doc_drift.rs does
+        # `include_str!("../../../README.md")` to keep the README flag table in
+        # lockstep with the CLI surface, and crates/claude-sandboxed/src/constants.rs
+        # reads HARDENING.md to assert the hardening doc quotes current limits.
+        # All other .md files are excluded so doc edits don't invalidate the
+        # cargo build cache.
+        || (lib.hasSuffix ".md" base && base != "README.md" && base != "HARDENING.md")
         || lib.hasSuffix ".sh" base
       );
   };
