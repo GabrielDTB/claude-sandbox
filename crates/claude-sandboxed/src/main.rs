@@ -89,6 +89,9 @@ fn run() -> Result<ExitCode, Error> {
     if cli.auth_token_file.is_none() {
         cli.auth_token_file = cfg.auth_token_file;
     }
+    if cli.gh_token_file.is_none() {
+        cli.gh_token_file = cfg.gh_token_file;
+    }
     if cli.cgroup_parent.is_none() {
         cli.cgroup_parent = cfg.cgroup_parent;
     }

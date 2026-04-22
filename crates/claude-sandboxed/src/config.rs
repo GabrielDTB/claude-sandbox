@@ -81,6 +81,15 @@ pub const REFERENCE: &str = "\
 # durably. Equivalent to --permissive when no CLI flag is given.
 # permissive = true
 
+# --- GitHub integration -----------------------------------------------------
+
+# Path to a file containing a GitHub PAT. When set, the PAT is injected into
+# the sandbox as `$GH_TOKEN` so the `gh` CLI inside is authenticated. When
+# unset, no token is passed — `gh` runs unauthenticated. Ignored with
+# `--anonymous`. A set path that doesn't exist (or is empty) is an error.
+# Equivalent to --gh-token-file / $CLAUDE_SANDBOX_GH_TOKEN_FILE.
+# gh_token_file = \"~/.config/claude-sandboxed/gh-token\"
+
 # --- Git integration --------------------------------------------------------
 # On the first launch of a given sandbox — i.e. when .claude-sandboxed/box-git
 # is uninitialized — copy the workspace's .git directory into box-git so the
@@ -115,6 +124,10 @@ pub struct Config {
     pub auth_proxy: Option<String>,
     /// Default value for `--auth-token-file` / `CLAUDE_SANDBOX_AUTH_TOKEN_FILE`.
     pub auth_token_file: Option<PathBuf>,
+    /// Default value for `--gh-token-file` / `CLAUDE_SANDBOX_GH_TOKEN_FILE`.
+    /// Points at a file whose contents are injected into the sandbox as
+    /// `$GH_TOKEN`. Unset by default — no token is passed through.
+    pub gh_token_file: Option<PathBuf>,
     /// Seed value for `model` in a newly bootstrapped sandbox's
     /// `claude/settings.json`. Applied only when that file is being created
     /// fresh; existing sandboxes keep whatever `/model` the user picked
@@ -181,8 +194,10 @@ fn parse_at(path: &std::path::Path) -> Result<Config, crate::Error> {
     let home = std::env::var_os("HOME");
     let home = home.as_ref().filter(|v| !v.is_empty()).map(std::path::Path::new);
     expand_tilde(&mut cfg.auth_token_file, home)?;
+    expand_tilde(&mut cfg.gh_token_file, home)?;
     if let Some(base) = path.parent() {
         resolve_relative(&mut cfg.auth_token_file, base);
+        resolve_relative(&mut cfg.gh_token_file, base);
     }
     Ok(cfg)
 }
@@ -371,12 +386,23 @@ mod tests {
         let c: Config = toml::from_str(super::REFERENCE).unwrap();
         assert!(c.auth_proxy.is_none());
         assert!(c.auth_token_file.is_none());
+        assert!(c.gh_token_file.is_none());
         assert!(c.default_model.is_none());
         assert!(c.default_theme.is_none());
         assert!(c.permissive.is_none());
         assert!(c.copy_git_on_init.is_none());
         assert!(c.copy_git_on_launch.is_none());
         assert!(c.cgroup_parent.is_none());
+    }
+
+    #[test]
+    fn parses_gh_token_file() {
+        let f = write_config(r#"gh_token_file = "/etc/claude/gh-token""#);
+        let c = parse_at(f.path()).unwrap();
+        assert_eq!(
+            c.gh_token_file.as_deref(),
+            Some(std::path::Path::new("/etc/claude/gh-token")),
+        );
     }
 
     #[test]

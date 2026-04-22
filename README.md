@@ -87,7 +87,7 @@ Prerequisites:
 
 - Linux with `podman` available (rootless is fine).
 - An existing Claude credentials file at `$CLAUDE_CREDENTIALS` or `~/.claude/.credentials.json` (create it by running `claude login` once on the host, outside the sandbox).
-- If you want GitHub CLI inside the sandbox, put a token at `$CLAUDE_SANDBOX_GH_TOKEN` or `~/.claude/sandbox-gh-token`.
+- If you want GitHub CLI inside the sandbox, point `gh_token_file` in `~/.config/claude-sandboxed/config.toml` (or `--gh-token-file` / `CLAUDE_SANDBOX_GH_TOKEN_FILE`) at a file containing a PAT.
 
 The first launch lazily `podman load`s the container images (sandbox, minimal, auth proxy) and marks them loaded under `$XDG_CACHE_HOME/claude-sandbox/`. Subsequent launches skip the load.
 
@@ -174,6 +174,7 @@ claude-sandboxed <workspace> [options] [-- claude-args...]
 | `--permissive` | — | Pass `--dangerously-skip-permissions` to `claude` inside. Combined with `permissive = true` in config it also seeds `skipDangerousModePermissionPrompt: true` into a fresh sandbox's `claude/settings.json`. |
 | `--auth-proxy URL` | `CLAUDE_SANDBOX_AUTH_PROXY` | Use an external proxy at `URL` instead of spawning an embedded one. Requires `--auth-token-file`. |
 | `--auth-token-file PATH` | `CLAUDE_SANDBOX_AUTH_TOKEN_FILE` | File containing the sandbox bearer token for the external proxy. |
+| `--gh-token-file PATH` | `CLAUDE_SANDBOX_GH_TOKEN_FILE` | File containing a GitHub PAT to expose inside the sandbox as `$GH_TOKEN`. Unset by default. Ignored with `--anonymous`. |
 | `--copy-git` / `--no-copy-git` | — | Force the host `.git` copy on / off for this launch, overriding config. See [Git integration](#git-integration). |
 | `--print-default-config` | — | Print an annotated reference `config.toml` to stdout and exit. Pipe into `~/.config/claude-sandboxed/config.toml` to bootstrap. |
 | `[-- claude-args…]` | — | Trailing arguments are passed verbatim to `claude` inside the sandbox. |
@@ -183,7 +184,7 @@ Precedence for any option that also exists in the config file: **flag > env > co
 ### Environment variables the launcher reads
 
 - `CLAUDE_CREDENTIALS` — host-side OAuth creds file (embedded proxy only). Default: `~/.claude/.credentials.json`. Must exist before first launch.
-- `CLAUDE_SANDBOX_GH_TOKEN` — optional GitHub token file. Default: `~/.claude/sandbox-gh-token`. Ignored with `--anonymous`.
+- `CLAUDE_SANDBOX_GH_TOKEN_FILE` — equivalent to `--gh-token-file` / `gh_token_file` in `config.toml`: path to a file containing a GitHub PAT to expose inside the sandbox as `$GH_TOKEN`. Unset by default. Ignored with `--anonymous`.
 - `PIDS_LIMIT` — overrides the container's default `--pids-limit 4096`.
 - `TERM`, `COLORTERM`, `LANG` — forwarded to the container (with sensible defaults).
 

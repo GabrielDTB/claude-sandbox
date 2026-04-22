@@ -190,10 +190,11 @@ pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, 
         args.push(OsString::from(e.clone()));
     }
 
-    // GH_TOKEN: shell reads $CLAUDE_SANDBOX_GH_TOKEN or $HOME/.claude/sandbox-gh-token
-    // unless --anonymous was passed.
+    // GH_TOKEN: resolved by clap+config as `cli.gh_token_file` (flag > env >
+    // config.toml > unset). Inject only when a path was explicitly given and
+    // `--anonymous` was not passed. A set-but-missing/empty file is an error.
     if !cli.anonymous {
-        if let Some(tok) = gh_token()? {
+        if let Some(tok) = gh_token(cli.gh_token_file.as_deref())? {
             push!("-e");
             args.push(OsString::from(format!("GH_TOKEN={tok}")));
         }
@@ -291,22 +292,20 @@ fn discover_shared_slice() -> Option<String> {
     (state == "loaded").then_some(slice)
 }
 
-fn gh_token() -> Result<Option<String>, crate::Error> {
-    let default = std::env::var_os("HOME")
-        .map(|h| std::path::PathBuf::from(h).join(".claude").join("sandbox-gh-token"));
-    let path = match std::env::var_os("CLAUDE_SANDBOX_GH_TOKEN") {
-        Some(p) => Some(std::path::PathBuf::from(p)),
-        None => default,
-    };
+/// Load the GH PAT from the path resolved by CLI + env + config (or `None`
+/// when no source set it). Error semantics match the auth-token loader in
+/// `proxy_external::load_token`: a path that the user explicitly provided
+/// must resolve to a non-empty file, otherwise fail loudly — silently
+/// proceeding would launch `gh` unauthenticated and hide the misconfiguration.
+fn gh_token(path: Option<&std::path::Path>) -> Result<Option<String>, crate::Error> {
     let Some(p) = path else { return Ok(None) };
     if !p.is_file() {
-        return Ok(None);
+        return Err(format!("gh token file not found: {}", p.display()).into());
     }
-    let raw = std::fs::read_to_string(&p)?;
+    let raw = std::fs::read_to_string(p)?;
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(trimmed.to_string()))
+        return Err(format!("gh token file is empty: {}", p.display()).into());
     }
+    Ok(Some(trimmed.to_string()))
 }

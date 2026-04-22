@@ -44,7 +44,6 @@ let
   #   SANDBOX_PROXY_URL  — value of ANTHROPIC_BASE_URL inside the sandbox
   #   TTY_FLAG           — array: empty, (-it), or (-i)
   #   SANDBOX_IMAGE      — OCI image name (e.g. claude-sandbox:latest)
-  #   ANONYMOUS          — 0 or 1; when 1, identity-leaking config is suppressed
   #   STUB_CREDS         — (optional) path to stub credentials file
   mkPodmanRun =
     {
@@ -95,13 +94,6 @@ let
 
       if [ -f "$SANDBOX_DIR/claude.json" ]; then
         PODMAN_ARGS+=(-v "$SANDBOX_DIR/claude.json:/home/user/.claude.json:rw")
-      fi
-
-      if [ "$ANONYMOUS" != 1 ]; then
-        GH_TOKEN_FILE="''${CLAUDE_SANDBOX_GH_TOKEN:-$HOME/.claude/sandbox-gh-token}"
-        if [ -f "$GH_TOKEN_FILE" ]; then
-          PODMAN_ARGS+=(-e "GH_TOKEN=$(${container.coreutils}/bin/cat "$GH_TOKEN_FILE")")
-        fi
       fi
 
       # Runtime extra bind mounts.
@@ -159,7 +151,6 @@ let
     SANDBOX_PROXY_URL="http://127.0.0.1:0"
     TTY_FLAG=()
     SANDBOX_IMAGE="claude-sandbox:latest"
-    ANONYMOUS=0
     DEV_ENV=0
     CPU_LIMIT=""
     MEMORY_LIMIT=""

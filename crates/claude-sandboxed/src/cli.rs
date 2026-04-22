@@ -93,6 +93,18 @@ pub struct Cli {
     )]
     pub auth_token_file: Option<PathBuf>,
 
+    /// File containing a GitHub PAT to expose inside the sandbox as `$GH_TOKEN`.
+    ///
+    /// Unset by default — no token is passed unless this flag, the
+    /// `CLAUDE_SANDBOX_GH_TOKEN_FILE` env var, or `gh_token_file` in
+    /// `config.toml` points at a file. Ignored with `--anonymous`.
+    #[arg(
+        long = "gh-token-file",
+        value_name = "PATH",
+        env = "CLAUDE_SANDBOX_GH_TOKEN_FILE"
+    )]
+    pub gh_token_file: Option<PathBuf>,
+
     /// Copy the host workspace's `.git` into the sandbox (force-on).
     ///
     /// When set, re-syncs `box-git/` from the host `.git` on this launch,
