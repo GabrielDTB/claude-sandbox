@@ -18,6 +18,7 @@ See `HARDENING.md` for the full threat model and mitigation checklist, and `FUTU
 - [Installing via Nix](#installing-via-nix)
 - [`claude-sandboxed` CLI](#claude-sandboxed-cli)
 - [User config file](#user-config-file)
+- [Inherited globals](#inherited-globals)
 - [Auth proxy modes](#auth-proxy-modes)
 - [Running the proxy as a system service (NixOS)](#running-the-proxy-as-a-system-service-nixos)
 - [`claude-proxy` admin CLI](#claude-proxy-admin-cli)
@@ -176,6 +177,11 @@ claude-sandboxed <workspace> [options] [-- claude-args...]
 | `--auth-token-file PATH` | `CLAUDE_SANDBOX_AUTH_TOKEN_FILE` | File containing the sandbox bearer token for the external proxy. |
 | `--gh-token-file PATH` | `CLAUDE_SANDBOX_GH_TOKEN_FILE` | File containing a GitHub PAT to expose inside the sandbox as `$GH_TOKEN`. Unset by default. Ignored with `--anonymous`. |
 | `--copy-git` / `--no-copy-git` | — | Force the host `.git` copy on / off for this launch, overriding config. See [Git integration](#git-integration). |
+| `--profile NAME` | — | Inherit skills/memory from `[profiles.NAME]` in `config.toml`. See [Inherited globals](#inherited-globals). |
+| `--skill-tag TAG` (repeatable) | — | Additional skill tag to inherit (prefix-at-segment-boundary match). Layered on top of `--profile`. |
+| `--memory-tag TAG` (repeatable) | — | Additional memory tag to inherit. |
+| `--skill-file PATH` (repeatable) | — | Specific skill file to inherit, relative to `$XDG_DATA_HOME/claude-sandboxed/skills/`. |
+| `--memory-file PATH` (repeatable) | — | Specific memory file to inherit, relative to `$XDG_DATA_HOME/claude-sandboxed/memory/`. |
 | `--print-default-config` | — | Print an annotated reference `config.toml` to stdout and exit. Pipe into `~/.config/claude-sandboxed/config.toml` to bootstrap. |
 | `[-- claude-args…]` | — | Trailing arguments are passed verbatim to `claude` inside the sandbox. |
 
@@ -228,6 +234,64 @@ Path fields (`auth_token_file`) support `~` / `~/…` expansion; other relative 
 - `default_model`, `default_theme`: only applied on first launch of a fresh sandbox (`claude.json` / `claude/settings.json` missing or empty). Later launches keep whatever the user picked inside via `/model` or `/theme`.
 - `permissive`: both a durable default for the `--permissive` flag _and_ a one-shot seed of `skipDangerousModePermissionPrompt: true` into a fresh `claude/settings.json`.
 - `copy_git_on_init` / `copy_git_on_launch`: runtime flags, applied every launch (but "on init" only fires when `box-git/` is empty).
+
+---
+
+## Inherited globals
+
+Skills and memory files can be shared across sandboxes instead of being re-derived per project. Content lives on the host under `$XDG_DATA_HOME/claude-sandboxed/` (fallback `~/.local/share/claude-sandboxed/`):
+
+```
+~/.local/share/claude-sandboxed/
+├── skills/
+│   ├── languages/python/typing.md
+│   ├── languages/rust/traits.md
+│   └── cli/clap/derive.md
+└── memory/
+    └── python/testing/pytest.md
+```
+
+The directory chain between `skills/` (or `memory/`) and a file becomes the file's implicit **tag** — e.g. `skills/languages/python/typing.md` carries the tag `languages/python`. Tag matching is **prefix-at-segment-boundary**: the tag `languages` matches `languages/python` and `languages/rust`, but not `languages-extended`. The separator is `/`.
+
+### Profiles
+
+Declare named sets of tags (and optional explicit files) in `config.toml` under `[profiles.<name>]`:
+
+```toml
+[profiles.python-cli]
+tags = ["languages/python"]       # applied to both skills and memory
+
+[profiles.python-cli.skills]
+tags = ["cli/clap"]               # unioned with the shared `tags` above
+extra_files = ["misc/readme-style.md"]
+
+[profiles.python-cli.memory]
+tags = ["python/testing"]
+extra_files = []
+```
+
+Selection rules:
+
+- A profile's top-level `tags` apply to **both** skills and memory.
+- Per-kind subsections (`[profiles.<name>.skills]`, `[profiles.<name>.memory]`) add their own `tags` unioned on top, and optional `extra_files` holding paths relative to that kind's content directory (no absolute paths, no `..`).
+- Unknown keys in a profile or subsection are rejected (`deny_unknown_fields`).
+- There is no profile composition — a launch selects at most one profile. CLI flags stack additively on top.
+
+### Selecting per launch
+
+| Flag | Effect |
+| --- | --- |
+| `--profile NAME` | Use `[profiles.NAME]` from `config.toml`. Unknown name is a hard error before podman runs. |
+| `--skill-tag TAG` / `--memory-tag TAG` | Add an ad-hoc tag (repeatable), prefix-matched the same way profile tags are. |
+| `--skill-file PATH` / `--memory-file PATH` | Add a specific file (repeatable), relative to the kind's content dir. |
+
+The three mechanisms are additive and deduplicated: a file matching both a profile tag and an explicit `--skill-file` mounts exactly once.
+
+### How they reach the sandbox
+
+Each selected file is bind-mounted **read-only** as its own `-v` arg at `/home/user/.claude/{skills,memory}/<relpath>`. The containing directories remain the existing rw `.claude` state-dir mount, so the sandbox agent can still create sibling files normally — only the inherited files themselves are immutable. Nothing is copied into per-sandbox state; edits to the host content dir are picked up on next launch.
+
+Requesting any tag or file when the corresponding `skills/` or `memory/` subdirectory does not exist is a hard error (the user asked for something concrete; silently mounting nothing would hide the misconfiguration).
 
 ---
 
@@ -447,6 +511,7 @@ crates/
 │       ├── firewall.rs                # nftables + capability-drop script
 │       ├── pty.rs                     # PTY interposer; ^Z handling, termios restore
 │       ├── devenv.rs                  # --flake / --devenv capture
+│       ├── globals.rs                 # inherited skills/memory selection + per-file mounts
 │       ├── hookscan.rs                # hook snapshot + verify
 │       ├── images.rs                  # marker-cached `podman load`
 │       ├── paths.rs                   # Nix-baked store paths via option_env!

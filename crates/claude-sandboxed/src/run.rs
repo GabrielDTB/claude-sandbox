@@ -10,6 +10,7 @@ use std::process::ExitCode;
 
 use crate::cli::Cli;
 use crate::constants::{PUBLIC_DNS, SANDBOX_PIDS_LIMIT_DEFAULT};
+use crate::globals::Selected;
 use crate::paths;
 use crate::pty;
 use crate::state::State;
@@ -32,6 +33,10 @@ pub struct RunInputs<'a> {
     pub proxy_container_name: Option<&'a str>,
     /// true when --devenv or --flake was set.
     pub dev_env: bool,
+    /// Resolved set of inherited skills/memory files to bind-mount
+    /// read-only into `/home/user/.claude/{skills,memory}/<relpath>`.
+    /// One `-v` arg per file; empty `Selected` means no inheritance.
+    pub globals: &'a Selected,
 }
 
 pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, crate::Error> {
@@ -137,6 +142,26 @@ pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, 
         "{}:/home/user/.claude:rw",
         state.claude_dir().display()
     )));
+    // Inherited skills/memory — per-file read-only mounts layered on top
+    // of the rw `.claude` mount above. Parent dirs remain writable so the
+    // sandbox can still create sibling files; only these specific inherited
+    // files are read-only. Podman auto-creates intermediate target dirs.
+    for (host, rel) in &inputs.globals.skills {
+        push!("-v");
+        args.push(OsString::from(format!(
+            "{}:/home/user/.claude/skills/{}:ro",
+            host.display(),
+            rel.display()
+        )));
+    }
+    for (host, rel) in &inputs.globals.memory {
+        push!("-v");
+        args.push(OsString::from(format!(
+            "{}:/home/user/.claude/memory/{}:ro",
+            host.display(),
+            rel.display()
+        )));
+    }
     push!("-v");
     args.push(OsString::from(format!(
         "{}:/setup-firewall.sh:ro",

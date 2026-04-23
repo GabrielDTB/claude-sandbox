@@ -5,6 +5,7 @@ mod devenv;
 #[cfg(test)]
 mod doc_drift;
 mod firewall;
+mod globals;
 mod hookscan;
 mod images;
 mod paths;
@@ -111,6 +112,28 @@ fn run() -> Result<ExitCode, Error> {
         cfg.copy_git_on_init,
         cfg.copy_git_on_launch,
     );
+
+    // Resolve inherited skills/memory from profile + CLI additions. Done
+    // BEFORE any podman work so a bad profile name or missing `extra_files`
+    // entry fails before we spin up containers.
+    let profile = match cli.profile.as_deref() {
+        Some(name) => Some(cfg.profiles.get(name).ok_or_else(|| -> Error {
+            format!(
+                "unknown profile `{name}` (define it under [profiles.{name}] in config.toml)"
+            )
+            .into()
+        })?),
+        None => None,
+    };
+    let globals_root = globals::globals_root();
+    let selected_globals = globals::select(
+        globals_root.as_deref(),
+        profile,
+        &cli.skill_tag,
+        &cli.memory_tag,
+        &cli.skill_file,
+        &cli.memory_file,
+    )?;
 
     let seed = state::Seed {
         model: cfg.default_model,
@@ -228,6 +251,7 @@ fn run() -> Result<ExitCode, Error> {
         container_name: &sandbox_name,
         proxy_container_name: proxy_name,
         dev_env: cli.dev_env().is_some(),
+        globals: &selected_globals,
     };
     let code = run::run(&cli, &state, inputs)?;
 

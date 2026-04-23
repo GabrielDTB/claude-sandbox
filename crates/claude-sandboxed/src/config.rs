@@ -28,9 +28,12 @@
 //! Cargo.toml semantics. `~user` (other users' homes) is NOT supported — it
 //! would need `getpwnam`, which we don't pull in.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::Deserialize;
+
+use crate::globals::Profile;
 
 /// Annotated TOML reference for the user-global config. Printed by
 /// `claude-sandboxed --print-default-config`, and intended to be pipeable
@@ -115,6 +118,33 @@ pub const REFERENCE: &str = "\
 # only to override that auto-discovered default.
 # Equivalent to --cgroup-parent / $CLAUDE_SANDBOX_CGROUP_PARENT.
 # cgroup_parent = \"claude-sandboxed.slice\"
+
+# --- Inherited globals ------------------------------------------------------
+# Skills and memory files can be shared across sandboxes. Content lives under
+# $XDG_DATA_HOME/claude-sandboxed/{skills,memory}/ (fallback
+# ~/.local/share/claude-sandboxed/...). The directory a file sits in becomes
+# its tag — e.g. skills/languages/python/typing.md carries the tag
+# `languages/python`. Tag matching is prefix-at-segment-boundary: the tag
+# `languages` matches `languages/python` but not `languages-extended`.
+#
+# Define profiles here and select one per launch with --profile <name>, or
+# mix in ad-hoc items with --skill-tag / --memory-tag / --skill-file /
+# --memory-file (all repeatable, layered on top of the profile).
+#
+# Shared `tags` apply to both skills and memory; per-kind subsections add
+# more tags and specific files on top. `extra_files` holds paths relative
+# to the kind's content directory (no leading `/`, no `..`).
+
+# [profiles.python-cli]
+# tags = [\"languages/python\"]
+#
+# [profiles.python-cli.skills]
+# tags = [\"cli/clap\"]
+# extra_files = [\"misc/readme-style.md\"]
+#
+# [profiles.python-cli.memory]
+# tags = [\"python/testing\"]
+# extra_files = []
 ";
 
 #[derive(Debug, Default, Deserialize)]
@@ -155,6 +185,11 @@ pub struct Config {
     /// will be placed under. When unset, the launcher auto-discovers a
     /// user slice named `claude-sandboxed.slice` if one exists.
     pub cgroup_parent: Option<String>,
+    /// Named profiles for inherited skills/memory. Keyed by profile name;
+    /// selected at the CLI with `--profile <name>`. See `globals.rs` for
+    /// the matching semantics.
+    #[serde(default)]
+    pub profiles: HashMap<String, Profile>,
 }
 
 /// Resolve the config path, preferring `$XDG_CONFIG_HOME` then
@@ -393,6 +428,7 @@ mod tests {
         assert!(c.copy_git_on_init.is_none());
         assert!(c.copy_git_on_launch.is_none());
         assert!(c.cgroup_parent.is_none());
+        assert!(c.profiles.is_empty());
     }
 
     #[test]
@@ -414,21 +450,24 @@ mod tests {
 
     #[test]
     fn reference_field_names_match_config() {
-        // Strip the leading `# ` from every line that looks like a commented
-        // assignment (`# ident = ...`) and parse the result. Because Config
-        // uses `deny_unknown_fields`, a renamed/typo'd field in REFERENCE
-        // will fail here — which is exactly the drift we want to catch.
+        // Strip the leading `# ` from every line that looks like commented
+        // TOML syntax — either `ident = ...` assignments or `[section]` /
+        // `[[section]]` headers — and parse the result. Because Config,
+        // Profile, and Section all use `deny_unknown_fields`, a renamed or
+        // typo'd field in REFERENCE will fail here, which is exactly the
+        // drift we want to catch.
         let uncommented: String = super::REFERENCE
             .lines()
             .map(|line| {
                 let after_hash = line.trim_start().strip_prefix('#').map(str::trim_start);
                 match after_hash {
                     Some(rest)
-                        if rest
+                        if (rest
                             .chars()
                             .next()
                             .is_some_and(|c| c.is_ascii_alphabetic())
-                            && rest.contains('=') =>
+                            && rest.contains('='))
+                            || rest.starts_with('[') =>
                     {
                         rest.to_string()
                     }
@@ -439,5 +478,74 @@ mod tests {
             .join("\n");
         toml::from_str::<Config>(&uncommented)
             .expect("reference TOML has a field name that doesn't match Config");
+    }
+
+    #[test]
+    fn parses_profile_full_shape() {
+        let f = write_config(
+            r#"
+                [profiles.python-cli]
+                tags = ["languages/python"]
+
+                [profiles.python-cli.skills]
+                tags = ["cli/clap"]
+                extra_files = ["misc/readme.md"]
+
+                [profiles.python-cli.memory]
+                tags = ["python/testing"]
+                extra_files = []
+            "#,
+        );
+        let c = parse_at(f.path()).unwrap();
+        let p = c.profiles.get("python-cli").expect("profile missing");
+        assert_eq!(p.tags, vec!["languages/python".to_string()]);
+        let skills = p.skills.as_ref().unwrap();
+        assert_eq!(skills.tags, vec!["cli/clap".to_string()]);
+        assert_eq!(skills.extra_files, vec![PathBuf::from("misc/readme.md")]);
+        let memory = p.memory.as_ref().unwrap();
+        assert_eq!(memory.tags, vec!["python/testing".to_string()]);
+        assert!(memory.extra_files.is_empty());
+    }
+
+    #[test]
+    fn parses_profile_partial_shape() {
+        let f = write_config(
+            r#"
+                [profiles.bare]
+                tags = ["lang"]
+            "#,
+        );
+        let c = parse_at(f.path()).unwrap();
+        let p = c.profiles.get("bare").unwrap();
+        assert_eq!(p.tags, vec!["lang".to_string()]);
+        assert!(p.skills.is_none());
+        assert!(p.memory.is_none());
+    }
+
+    #[test]
+    fn unknown_profile_field_rejected() {
+        // kebab-case `extra-files` is the exact typo we want to fail loudly.
+        let f = write_config(
+            r#"
+                [profiles.bad.skills]
+                tags = ["x"]
+                extra-files = ["y"]
+            "#,
+        );
+        let err = parse_at(f.path()).unwrap_err().to_string();
+        assert!(err.contains("extra-files"), "got: {err}");
+    }
+
+    #[test]
+    fn unknown_top_level_profile_key_rejected() {
+        let f = write_config(
+            r#"
+                [profiles.bad]
+                tags = []
+                extends = ["other"]
+            "#,
+        );
+        let err = parse_at(f.path()).unwrap_err().to_string();
+        assert!(err.contains("extends"), "got: {err}");
     }
 }
