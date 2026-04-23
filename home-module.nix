@@ -5,10 +5,10 @@ let
   tomlFormat = pkgs.formats.toml { };
 
   # Submodule describing one layer of the inherited-globals selection for a
-  # single kind (skills or memory). Used at three places in the TOML schema:
-  # top-level `[skills]` / `[memory]`, profile-shared `[profiles.<name>]`
-  # (via the shared fields on `profileType` below), and profile-kind
-  # `[profiles.<name>.skills]` / `[profiles.<name>.memory]`.
+  # single kind (currently only skills; hooks and friends will reuse this).
+  # Used at three places in the TOML schema: top-level `[skills]`,
+  # profile-shared `[profiles.<name>]` (via the shared fields on
+  # `profileType` below), and profile-kind `[profiles.<name>.skills]`.
   #
   # `tags` and `extraFiles` are OVERRIDE fields — set them to replace the
   # inherited value (`[]` explicitly clears). `extraTags` and
@@ -38,19 +38,20 @@ let
       extraFiles = lib.mkOption {
         type = lib.types.nullOr (lib.types.listOf lib.types.str);
         default = null;
-        example = [ "misc/readme-style.md" ];
+        example = [ "misc/my-readme-style" ];
         description = ''
-          Override-semantic explicit-file list. Paths are relative to
-          the kind's content directory (no absolute paths, no `..`).
-          Same inherit/replace semantics as `tags`.
+          Override-semantic explicit-entry list. Paths are relative to
+          the kind's content directory (no absolute paths, no `..`);
+          for skills each entry names a directory containing a
+          `SKILL.md`. Same inherit/replace semantics as `tags`.
         '';
       };
       extraExtraFiles = lib.mkOption {
         type = lib.types.listOf lib.types.str;
         default = [ ];
-        example = [ "misc/extras.md" ];
+        example = [ "misc/another-skill" ];
         description = ''
-          Additive explicit-file list. Unioned on top of whatever
+          Additive explicit-entry list. Unioned on top of whatever
           `extraFiles` resolved to from outer layers. The
           `extraExtra` name is deliberate — `extraFiles` was already
           taken by the override list.
@@ -60,7 +61,7 @@ let
   };
 
   # Submodule for a named profile. Has the four section-level fields
-  # (shared across both kinds when this profile is selected) plus optional
+  # (shared across every kind when this profile is selected) plus optional
   # per-kind subsections that further override/add for just that kind.
   profileType = lib.types.submodule {
     options = {
@@ -69,9 +70,9 @@ let
         default = null;
         example = [ "languages/python" ];
         description = ''
-          Profile-shared override tags — applied to both `skills` and
-          `memory` when this profile is selected. `null` inherits
-          from the top-level section; a list replaces it.
+          Profile-shared override tags — applied to every kind when
+          this profile is selected. `null` inherits from the top-level
+          section; a list replaces it.
         '';
       };
       extraTags = lib.mkOption {
@@ -79,24 +80,24 @@ let
         default = [ ];
         example = [ "cli/clap" ];
         description = ''
-          Profile-shared additive tags — unioned onto both kinds'
-          resolved tag lists.
+          Profile-shared additive tags — unioned onto every kind's
+          resolved tag list.
         '';
       };
       extraFiles = lib.mkOption {
         type = lib.types.nullOr (lib.types.listOf lib.types.str);
         default = null;
         description = ''
-          Profile-shared override for the explicit-file list, applied
-          to both kinds.
+          Profile-shared override for the explicit-entry list, applied
+          to every kind.
         '';
       };
       extraExtraFiles = lib.mkOption {
         type = lib.types.listOf lib.types.str;
         default = [ ];
         description = ''
-          Profile-shared additive explicit-file list, applied to both
-          kinds.
+          Profile-shared additive explicit-entry list, applied to every
+          kind.
         '';
       };
       skills = lib.mkOption {
@@ -105,14 +106,6 @@ let
         description = ''
           Skills-only subsection of this profile. Overrides / adds on
           top of the profile-shared fields above for the `skills` kind.
-        '';
-      };
-      memory = lib.mkOption {
-        type = lib.types.nullOr sectionType;
-        default = null;
-        description = ''
-          Memory-only subsection of this profile. Overrides / adds on
-          top of the profile-shared fields above for the `memory` kind.
         '';
       };
     };
@@ -140,11 +133,9 @@ let
         inherit (profile) tags extraTags extraFiles extraExtraFiles;
       };
       skillsToml = sectionToToml profile.skills;
-      memoryToml = sectionToToml profile.memory;
     in
     shared
-    // lib.optionalAttrs (skillsToml != null) { skills = skillsToml; }
-    // lib.optionalAttrs (memoryToml != null) { memory = memoryToml; };
+    // lib.optionalAttrs (skillsToml != null) { skills = skillsToml; };
 
   # Collect only the fields the user actually set. `null` means "leave
   # unset so the launcher falls back to its built-in default" — we drop
@@ -161,7 +152,6 @@ let
     copy_git_on_launch = cfg.copyGitOnLaunch;
     cgroup_parent      = cfg.cgroupParent;
     skills             = sectionToToml cfg.skills;
-    memory             = sectionToToml cfg.memory;
     profiles           = lib.mapAttrs (_: profileToToml) cfg.profiles;
   };
 
@@ -302,7 +292,7 @@ in
       example = lib.literalExpression ''
         {
           tags = [ "misc" ];
-          extraFiles = [ "misc/readme-style.md" ];
+          extraFiles = [ "misc/my-readme-style" ];
         }
       '';
       description = ''
@@ -315,20 +305,6 @@ in
       '';
     };
 
-    memory = lib.mkOption {
-      type = lib.types.nullOr sectionType;
-      default = null;
-      example = lib.literalExpression ''
-        {
-          tags = [ "python/testing" ];
-        }
-      '';
-      description = ''
-        Top-level `[memory]` section. Same layering semantics as
-        `skills`, against the memory content tree.
-      '';
-    };
-
     profiles = lib.mkOption {
       type = lib.types.attrsOf profileType;
       default = { };
@@ -337,8 +313,7 @@ in
           python-cli = {
             tags = [ "languages/python" ];
             extraTags = [ "cli/clap" ];
-            skills.extraFiles = [ "misc/readme-style.md" ];
-            memory.tags = [ "python/testing" ];
+            skills.extraFiles = [ "misc/my-readme-style" ];
           };
         }
       '';
@@ -348,9 +323,9 @@ in
         `config.toml`; select one per launch with `--profile <name>`.
 
         Each profile has the same four section-level fields as the
-        top-level `skills` / `memory` options (applied to BOTH kinds
-        when the profile is active) plus optional `skills` / `memory`
-        subsections that further override or add on a per-kind basis.
+        top-level `skills` option (applied to every kind when the
+        profile is active) plus an optional `skills` subsection that
+        further overrides or adds on a per-kind basis.
       '';
     };
 

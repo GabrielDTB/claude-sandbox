@@ -120,18 +120,23 @@ pub const REFERENCE: &str = "\
 # cgroup_parent = \"claude-sandboxed.slice\"
 
 # --- Inherited globals ------------------------------------------------------
-# Skills and memory files can be shared across sandboxes. Content lives under
-# $XDG_DATA_HOME/claude-sandboxed/{skills,memory}/ (fallback
-# ~/.local/share/claude-sandboxed/...). The directory a file sits in becomes
-# its tag — e.g. skills/languages/python/typing.md carries the tag
-# `languages/python`. Tag matching is prefix-at-segment-boundary: the tag
+# Skill directories can be shared across sandboxes. Content lives under
+# $XDG_DATA_HOME/claude-sandboxed/skills/ (fallback
+# ~/.local/share/claude-sandboxed/skills/). A skill is any directory
+# containing a SKILL.md file; the directory chain from `skills/` to the
+# skill's parent becomes its implicit tag — e.g.
+# `skills/languages/python/my-helper/SKILL.md` carries the tag
+# `languages/python`. SKILL.md can also declare additional tags in YAML
+# frontmatter (`tags: [cli/clap, general]`); a skill matches a configured
+# tag when the tag prefix-at-boundary-matches ANY of its chains — the dir
+# chain or any frontmatter entry. Tag matching is prefix-at-segment-boundary:
 # `languages` matches `languages/python` but not `languages-extended`.
 #
 # Selection is layered, with three levels (outermost to innermost):
 #
-#   1. top-level [skills] / [memory]          — default for every launch
-#   2. [profiles.<name>]                      — shared across both kinds
-#   3. [profiles.<name>.skills] / .memory     — per-kind, most specific
+#   1. top-level [skills]                     — default for every launch
+#   2. [profiles.<name>]                      — shared across kinds
+#   3. [profiles.<name>.skills]               — per-kind, most specific
 #
 # At every level you can set four fields:
 #
@@ -140,13 +145,13 @@ pub const REFERENCE: &str = "\
 #   extra_files       — OVERRIDE. Replaces the inherited explicit-file list.
 #   extra_extra_files — ADDITIVE. Unioned with whatever's above.
 #
-# CLI flags --skill-tag / --memory-tag / --skill-file / --memory-file
-# (all repeatable) stack additively on top of the resolved config values.
-# Select a profile per launch with --profile <name>.
+# CLI flags --skill-tag / --skill-file (repeatable) stack additively on top
+# of the resolved config values. Select a profile per launch with
+# --profile <name>.
 #
-# Paths in extra_files / extra_extra_files are relative to the kind's
-# content directory (e.g. `languages/python/typing.md` resolves under
-# `skills/` or `memory/`). Absolute paths and `..` are rejected.
+# Paths in extra_files / extra_extra_files are relative to `skills/` and
+# name a SKILL.md-bearing directory (e.g. `misc/my-readme-style`). Absolute
+# paths and `..` are rejected.
 
 # Defaults applied to every launch, regardless of --profile.
 # [skills]
@@ -154,23 +159,15 @@ pub const REFERENCE: &str = "\
 # extra_tags        = []
 # extra_files       = []
 # extra_extra_files = []
-#
-# [memory]
-# tags              = []
-# extra_files       = []
 
 # A named profile. Select with --profile python-cli.
 # [profiles.python-cli]
-# tags       = [\"languages/python\"]   # overrides top-level for BOTH kinds
+# tags       = [\"languages/python\"]   # shared across every kind
 # extra_tags = [\"cli/clap\"]           # added on top of the resolved tags
 #
 # [profiles.python-cli.skills]
-# tags        = [\"cli/clap\"]          # overrides the profile-shared tags for skills
-# extra_files = [\"misc/readme-style.md\"]
-#
-# [profiles.python-cli.memory]
-# tags              = [\"python/testing\"]
-# extra_extra_files = []
+# tags        = [\"cli/clap\"]                # overrides the profile-shared tags for skills
+# extra_files = [\"misc/my-readme-style\"]    # names a skill directory
 ";
 
 #[derive(Debug, Default, Deserialize)]
@@ -216,10 +213,7 @@ pub struct Config {
     /// profile-kind-level `tags` / `extra_files` replace these, while
     /// `extra_tags` / `extra_extra_files` accumulate. See `globals.rs`.
     pub skills: Option<Section>,
-    /// Default memory-globals selection applied to every launch; same
-    /// layering semantics as `skills`.
-    pub memory: Option<Section>,
-    /// Named profiles for inherited skills/memory. Keyed by profile name;
+    /// Named profiles for inherited skills. Keyed by profile name;
     /// selected at the CLI with `--profile <name>`. See `globals.rs` for
     /// the matching semantics.
     #[serde(default)]
@@ -463,7 +457,6 @@ mod tests {
         assert!(c.copy_git_on_launch.is_none());
         assert!(c.cgroup_parent.is_none());
         assert!(c.skills.is_none());
-        assert!(c.memory.is_none());
         assert!(c.profiles.is_empty());
     }
 
@@ -527,12 +520,8 @@ mod tests {
                 [profiles.python-cli.skills]
                 tags              = ["cli/clap"]
                 extra_tags        = ["more/skills"]
-                extra_files       = ["misc/readme.md"]
-                extra_extra_files = ["misc/other.md"]
-
-                [profiles.python-cli.memory]
-                tags              = ["python/testing"]
-                extra_files       = []
+                extra_files       = ["misc/readme-style"]
+                extra_extra_files = ["misc/other-skill"]
             "#,
         );
         let c = parse_at(f.path()).unwrap();
@@ -546,13 +535,12 @@ mod tests {
         assert_eq!(skills.extra_tags, vec!["more/skills".to_string()]);
         assert_eq!(
             skills.extra_files.as_deref(),
-            Some(&[PathBuf::from("misc/readme.md")][..])
+            Some(&[PathBuf::from("misc/readme-style")][..])
         );
-        assert_eq!(skills.extra_extra_files, vec![PathBuf::from("misc/other.md")]);
-        let memory = p.memory.as_ref().unwrap();
-        assert_eq!(memory.tags.as_deref(), Some(&["python/testing".to_string()][..]));
-        // `extra_files = []` is explicit-empty override, distinct from absent.
-        assert_eq!(memory.extra_files.as_deref(), Some(&[][..]));
+        assert_eq!(
+            skills.extra_extra_files,
+            vec![PathBuf::from("misc/other-skill")]
+        );
     }
 
     #[test]
@@ -569,20 +557,16 @@ mod tests {
         assert!(p.extra_tags.is_empty());
         assert!(p.extra_files.is_none());
         assert!(p.skills.is_none());
-        assert!(p.memory.is_none());
     }
 
     #[test]
-    fn parses_top_level_skills_and_memory() {
+    fn parses_top_level_skills() {
         let f = write_config(
             r#"
                 [skills]
                 tags        = ["languages"]
                 extra_tags  = ["cli"]
-                extra_files = ["misc/readme.md"]
-
-                [memory]
-                tags = ["python/testing"]
+                extra_files = ["misc/my-readme-style"]
             "#,
         );
         let c = parse_at(f.path()).unwrap();
@@ -591,11 +575,8 @@ mod tests {
         assert_eq!(skills.extra_tags, vec!["cli".to_string()]);
         assert_eq!(
             skills.extra_files.as_deref(),
-            Some(&[PathBuf::from("misc/readme.md")][..])
+            Some(&[PathBuf::from("misc/my-readme-style")][..])
         );
-        let memory = c.memory.as_ref().unwrap();
-        assert_eq!(memory.tags.as_deref(), Some(&["python/testing".to_string()][..]));
-        assert!(memory.extra_files.is_none());
     }
 
     #[test]

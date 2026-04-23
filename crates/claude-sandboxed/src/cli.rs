@@ -131,38 +131,27 @@ pub struct Cli {
     pub no_copy_git: bool,
 
     /// Name of a `[profiles.<name>]` block in config.toml to inherit
-    /// skills/memory from.
+    /// skills from.
     ///
-    /// Layered on top of any `--skill-tag` / `--memory-tag` /
-    /// `--skill-file` / `--memory-file` entries (those are additive). Fails
-    /// loudly if the named profile is not declared.
+    /// Layered on top of any `--skill-tag` / `--skill-file` entries (those
+    /// are additive). Fails loudly if the named profile is not declared.
     #[arg(long = "profile", value_name = "NAME")]
     pub profile: Option<String>,
 
     /// Tag of inherited skills to include (prefix-at-segment-boundary match;
     /// repeatable).
     ///
-    /// E.g. `--skill-tag languages/python` pulls in every file under
+    /// E.g. `--skill-tag languages/python` pulls in every skill dir under
     /// `$XDG_DATA_HOME/claude-sandboxed/skills/languages/python/**`.
     #[arg(long = "skill-tag", value_name = "TAG", action = clap::ArgAction::Append)]
     pub skill_tag: Vec<String>,
 
-    /// Tag of inherited memory files to include (repeatable; same matching
-    /// rules as `--skill-tag`).
-    #[arg(long = "memory-tag", value_name = "TAG", action = clap::ArgAction::Append)]
-    pub memory_tag: Vec<String>,
-
-    /// Specific skill file to inherit, relative to
-    /// `$XDG_DATA_HOME/claude-sandboxed/skills/` (repeatable). Must be a
-    /// path inside the skills dir — absolute paths and `..` components are
-    /// rejected.
+    /// Specific skill directory to inherit, relative to
+    /// `$XDG_DATA_HOME/claude-sandboxed/skills/` (repeatable). Must name a
+    /// directory containing a `SKILL.md` — absolute paths and `..`
+    /// components are rejected.
     #[arg(long = "skill-file", value_name = "PATH", action = clap::ArgAction::Append)]
     pub skill_file: Vec<PathBuf>,
-
-    /// Specific memory file to inherit, relative to
-    /// `$XDG_DATA_HOME/claude-sandboxed/memory/` (repeatable).
-    #[arg(long = "memory-file", value_name = "PATH", action = clap::ArgAction::Append)]
-    pub memory_file: Vec<PathBuf>,
 
     /// Print an annotated reference config to stdout and exit.
     ///

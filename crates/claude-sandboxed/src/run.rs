@@ -33,9 +33,9 @@ pub struct RunInputs<'a> {
     pub proxy_container_name: Option<&'a str>,
     /// true when --devenv or --flake was set.
     pub dev_env: bool,
-    /// Resolved set of inherited skills/memory files to bind-mount
-    /// read-only into `/home/user/.claude/{skills,memory}/<relpath>`.
-    /// One `-v` arg per file; empty `Selected` means no inheritance.
+    /// Resolved set of inherited skill directories to bind-mount
+    /// read-only into `/home/user/.claude/skills/<name>/`. One `-v` arg
+    /// per skill; empty `Selected` means no inheritance.
     pub globals: &'a Selected,
 }
 
@@ -142,24 +142,17 @@ pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, 
         "{}:/home/user/.claude:rw",
         state.claude_dir().display()
     )));
-    // Inherited skills/memory — per-file read-only mounts layered on top
-    // of the rw `.claude` mount above. Parent dirs remain writable so the
-    // sandbox can still create sibling files; only these specific inherited
-    // files are read-only. Podman auto-creates intermediate target dirs.
-    for (host, rel) in &inputs.globals.skills {
+    // Inherited skill directories — per-skill read-only mounts layered
+    // on top of the rw `.claude` mount above. The `skills/` parent is
+    // tmpfs-rw (auto-created by podman at mount time), so the agent can
+    // still create sibling skill dirs; only these specific inherited
+    // directories are read-only.
+    for sel in &inputs.globals.skills {
         push!("-v");
         args.push(OsString::from(format!(
             "{}:/home/user/.claude/skills/{}:ro",
-            host.display(),
-            rel.display()
-        )));
-    }
-    for (host, rel) in &inputs.globals.memory {
-        push!("-v");
-        args.push(OsString::from(format!(
-            "{}:/home/user/.claude/memory/{}:ro",
-            host.display(),
-            rel.display()
+            sel.host_path.display(),
+            sel.name,
         )));
     }
     push!("-v");

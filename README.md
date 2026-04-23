@@ -177,11 +177,9 @@ claude-sandboxed <workspace> [options] [-- claude-args...]
 | `--auth-token-file PATH` | `CLAUDE_SANDBOX_AUTH_TOKEN_FILE` | File containing the sandbox bearer token for the external proxy. |
 | `--gh-token-file PATH` | `CLAUDE_SANDBOX_GH_TOKEN_FILE` | File containing a GitHub PAT to expose inside the sandbox as `$GH_TOKEN`. Unset by default. Ignored with `--anonymous`. |
 | `--copy-git` / `--no-copy-git` | — | Force the host `.git` copy on / off for this launch, overriding config. See [Git integration](#git-integration). |
-| `--profile NAME` | — | Inherit skills/memory from `[profiles.NAME]` in `config.toml`. See [Inherited globals](#inherited-globals). |
+| `--profile NAME` | — | Inherit skills from `[profiles.NAME]` in `config.toml`. See [Inherited globals](#inherited-globals). |
 | `--skill-tag TAG` (repeatable) | — | Additional skill tag to inherit (prefix-at-segment-boundary match). Layered on top of `--profile`. |
-| `--memory-tag TAG` (repeatable) | — | Additional memory tag to inherit. |
-| `--skill-file PATH` (repeatable) | — | Specific skill file to inherit, relative to `$XDG_DATA_HOME/claude-sandboxed/skills/`. |
-| `--memory-file PATH` (repeatable) | — | Specific memory file to inherit, relative to `$XDG_DATA_HOME/claude-sandboxed/memory/`. |
+| `--skill-file PATH` (repeatable) | — | Specific skill directory to inherit, relative to `$XDG_DATA_HOME/claude-sandboxed/skills/`. |
 | `--print-default-config` | — | Print an annotated reference `config.toml` to stdout and exit. Pipe into `~/.config/claude-sandboxed/config.toml` to bootstrap. |
 | `[-- claude-args…]` | — | Trailing arguments are passed verbatim to `claude` inside the sandbox. |
 
@@ -239,27 +237,55 @@ Path fields (`auth_token_file`) support `~` / `~/…` expansion; other relative 
 
 ## Inherited globals
 
-Skills and memory files can be shared across sandboxes instead of being re-derived per project. Content lives on the host under `$XDG_DATA_HOME/claude-sandboxed/` (fallback `~/.local/share/claude-sandboxed/`):
+Skill directories can be shared across sandboxes instead of being re-derived per project. Content lives on the host under `$XDG_DATA_HOME/claude-sandboxed/skills/` (fallback `~/.local/share/claude-sandboxed/skills/`):
 
 ```
 ~/.local/share/claude-sandboxed/
-├── skills/
-│   ├── languages/python/typing.md
-│   ├── languages/rust/traits.md
-│   └── cli/clap/derive.md
-└── memory/
-    └── python/testing/pytest.md
+└── skills/
+    ├── languages/python/
+    │   └── typing-helper/
+    │       ├── SKILL.md
+    │       └── examples.py
+    └── cli/clap/
+        └── derive-help/
+            └── SKILL.md
 ```
 
-The directory chain between `skills/` (or `memory/`) and a file becomes the file's implicit **tag** — e.g. `skills/languages/python/typing.md` carries the tag `languages/python`. Tag matching is **prefix-at-segment-boundary**: the tag `languages` matches `languages/python` and `languages/rust`, but not `languages-extended`. The separator is `/`.
+A **skill** is any directory containing a `SKILL.md` file. Its **name** is the final path component of that directory (`typing-helper`, `derive-help`); that name is also the mount-target inside the sandbox (`/home/user/.claude/skills/<name>/`), so names must be unique across the selected set — a collision is a hard error.
+
+The directory chain between `skills/` and the skill's parent becomes the skill's implicit **tag** — `skills/languages/python/typing-helper/SKILL.md` carries the tag `languages/python`. Tag matching is **prefix-at-segment-boundary**: the tag `languages` matches `languages/python` and `languages/rust`, but not `languages-extended`. The separator is `/`.
+
+Stray `.md` files that aren't inside a `SKILL.md`-bearing directory are ignored. The walk stops descending at the first `SKILL.md` it finds, so files beneath a skill (e.g. `examples.py`, or a nested `SKILL.md`) are the skill's own assets — not separately-inherited skills.
+
+### File-level tags via frontmatter
+
+`SKILL.md` can declare additional tags through YAML frontmatter. A configured tag matches the skill if it prefix-at-boundary-matches *any* of the skill's chains — the dir chain OR any frontmatter entry:
+
+```markdown
+---
+tags: [cli/clap, general]
+description: Helper for writing clap derive structs
+---
+
+# body
+```
+
+If this is `skills/languages/python/typing-helper/SKILL.md`, the skill already carries the dir tag `languages/python`. The frontmatter adds two more: `cli/clap` and `general`. Any of `languages`, `languages/python`, `cli`, `cli/clap`, or `general` will now select it.
+
+Details:
+
+- Delimiters are `---` (the opening fence must be the very first line). The closing fence can be `---` or `...`, each on its own line.
+- Unknown sibling fields (`description`, `model`, etc.) are ignored — coexist cleanly with Claude Code's other frontmatter conventions.
+- Malformed frontmatter is a hard error: unclosed `---`, invalid YAML, empty-string tags, or tags with leading/trailing `/` all fail loudly.
+- Frontmatter scan is capped at 64 KiB per `SKILL.md` — pathological inputs that open `---` and never close are rejected before they can bloat memory.
 
 ### Layered configuration
 
 Selection is assembled from up to three layers (outermost → innermost):
 
-1. **top-level** `[skills]` / `[memory]` — defaults applied to every launch
-2. **profile-shared** `[profiles.<name>]` — applied to both kinds when the profile is selected
-3. **profile-kind** `[profiles.<name>.skills]` / `[profiles.<name>.memory]` — most specific
+1. **top-level** `[skills]` — defaults applied to every launch
+2. **profile-shared** `[profiles.<name>]` — applied across every kind when the profile is selected
+3. **profile-kind** `[profiles.<name>.skills]` — most specific
 
 Every layer can set four fields:
 
@@ -267,7 +293,7 @@ Every layer can set four fields:
 | --- | --- |
 | `tags` | **Override.** When present, replaces the inherited tag list entirely (even `tags = []` clears). |
 | `extra_tags` | **Additive.** Always unioned with whatever was resolved above. |
-| `extra_files` | **Override.** Replaces the inherited explicit-file list. Paths are relative to the kind's content directory (no absolute, no `..`). |
+| `extra_files` | **Override.** Replaces the inherited explicit-entry list. Paths are relative to `skills/` and name a `SKILL.md`-bearing directory (no absolute, no `..`). |
 | `extra_extra_files` | **Additive.** Always unioned with whatever was resolved above. Yes, the `extra_extra_` is intentional — `extra_files` was already taken for the override list. |
 
 Deepest-specified `tags`/`extra_files` win. All layers' `extra_tags` and `extra_extra_files` are concatenated. CLI flags then stack additively on top.
@@ -278,21 +304,14 @@ Deepest-specified `tags`/`extra_files` win. All layers' `extra_tags` and `extra_
 tags       = ["misc"]
 extra_tags = []
 
-[memory]
-tags = []
-
 # Pick with --profile python-cli
 [profiles.python-cli]
-tags       = ["languages/python"]   # overrides top-level for BOTH kinds
+tags       = ["languages/python"]   # shared across every kind
 extra_tags = ["cli/clap"]           # added to the resolved tags
 
 [profiles.python-cli.skills]
 tags        = ["cli/clap"]                  # overrides profile-shared for skills
-extra_files = ["misc/readme-style.md"]      # overrides top-level extra_files
-
-[profiles.python-cli.memory]
-tags              = ["python/testing"]
-extra_extra_files = []
+extra_files = ["misc/my-readme-style"]      # names a skill directory
 ```
 
 Unknown keys at any layer are rejected (`deny_unknown_fields`). A launch selects at most one profile — no profile composition.
@@ -302,16 +321,16 @@ Unknown keys at any layer are rejected (`deny_unknown_fields`). A launch selects
 | Flag | Effect |
 | --- | --- |
 | `--profile NAME` | Select `[profiles.NAME]` from `config.toml` as the middle + inner layers. Unknown name is a hard error before podman runs. |
-| `--skill-tag TAG` / `--memory-tag TAG` | Add an ad-hoc tag (repeatable), stacked additively on top of the resolved config values. |
-| `--skill-file PATH` / `--memory-file PATH` | Add a specific file (repeatable), same additive behavior as `extra_extra_files`. |
+| `--skill-tag TAG` | Add an ad-hoc tag (repeatable), stacked additively on top of the resolved config values. |
+| `--skill-file PATH` | Add a specific skill directory (repeatable), same additive behavior as `extra_extra_files`. |
 
-All mechanisms are deduplicated: a file matching both a tag walk and an explicit file entry mounts exactly once.
+All mechanisms are deduplicated: a skill matching both a tag walk and an explicit entry mounts exactly once.
 
 ### How they reach the sandbox
 
-Each selected file is bind-mounted **read-only** as its own `-v` arg at `/home/user/.claude/{skills,memory}/<relpath>`. The containing directories remain the existing rw `.claude` state-dir mount, so the sandbox agent can still create sibling files normally — only the inherited files themselves are immutable. Nothing is copied into per-sandbox state; edits to the host content dir are picked up on next launch.
+Each selected skill is bind-mounted **read-only** as its own `-v` arg at `/home/user/.claude/skills/<name>/`. The parent `skills/` dir is still the sandbox's tmpfs `.claude/` tree, so the agent can still create sibling skill directories normally — only the inherited skill dirs themselves are immutable. Nothing is copied into per-sandbox state; edits to the host content dir are picked up on next launch.
 
-Requesting any tag or file when the corresponding `skills/` or `memory/` subdirectory does not exist is a hard error (the user asked for something concrete; silently mounting nothing would hide the misconfiguration).
+Requesting any tag or skill entry when the `skills/` subdirectory does not exist is a hard error (the user asked for something concrete; silently mounting nothing would hide the misconfiguration).
 
 ---
 

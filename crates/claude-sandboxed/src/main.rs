@@ -113,9 +113,9 @@ fn run() -> Result<ExitCode, Error> {
         cfg.copy_git_on_launch,
     );
 
-    // Resolve inherited skills/memory from profile + CLI additions. Done
-    // BEFORE any podman work so a bad profile name or missing `extra_files`
-    // entry fails before we spin up containers.
+    // Resolve inherited skills from profile + CLI additions. Done BEFORE
+    // any podman work so a bad profile name or missing `extra_files` entry
+    // fails before we spin up containers.
     let profile = match cli.profile.as_deref() {
         Some(name) => Some(cfg.profiles.get(name).ok_or_else(|| -> Error {
             format!(
@@ -129,12 +129,9 @@ fn run() -> Result<ExitCode, Error> {
     let selected_globals = globals::select(
         globals_root.as_deref(),
         cfg.skills.as_ref(),
-        cfg.memory.as_ref(),
         profile,
         &cli.skill_tag,
-        &cli.memory_tag,
         &cli.skill_file,
-        &cli.memory_file,
     )?;
 
     let seed = state::Seed {
