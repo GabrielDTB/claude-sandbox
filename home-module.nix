@@ -4,11 +4,153 @@ let
   cfg = config.programs.claude-sandboxed;
   tomlFormat = pkgs.formats.toml { };
 
+  # Submodule describing one layer of the inherited-globals selection for a
+  # single kind (skills or memory). Used at three places in the TOML schema:
+  # top-level `[skills]` / `[memory]`, profile-shared `[profiles.<name>]`
+  # (via the shared fields on `profileType` below), and profile-kind
+  # `[profiles.<name>.skills]` / `[profiles.<name>.memory]`.
+  #
+  # `tags` and `extraFiles` are OVERRIDE fields — set them to replace the
+  # inherited value (`[]` explicitly clears). `extraTags` and
+  # `extraExtraFiles` are ADDITIVE — unioned with whatever's above.
+  sectionType = lib.types.submodule {
+    options = {
+      tags = lib.mkOption {
+        type = lib.types.nullOr (lib.types.listOf lib.types.str);
+        default = null;
+        example = [ "languages/python" ];
+        description = ''
+          Override-semantic tag list. `null` (the default) means
+          "inherit from the outer layer"; any list value — including
+          the empty list — replaces the inherited tags entirely.
+        '';
+      };
+      extraTags = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [ "cli/clap" ];
+        description = ''
+          Additive tag list. Always unioned with whatever `tags` were
+          resolved in outer layers, regardless of whether `tags` is
+          overridden here.
+        '';
+      };
+      extraFiles = lib.mkOption {
+        type = lib.types.nullOr (lib.types.listOf lib.types.str);
+        default = null;
+        example = [ "misc/readme-style.md" ];
+        description = ''
+          Override-semantic explicit-file list. Paths are relative to
+          the kind's content directory (no absolute paths, no `..`).
+          Same inherit/replace semantics as `tags`.
+        '';
+      };
+      extraExtraFiles = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [ "misc/extras.md" ];
+        description = ''
+          Additive explicit-file list. Unioned on top of whatever
+          `extraFiles` resolved to from outer layers. The
+          `extraExtra` name is deliberate — `extraFiles` was already
+          taken by the override list.
+        '';
+      };
+    };
+  };
+
+  # Submodule for a named profile. Has the four section-level fields
+  # (shared across both kinds when this profile is selected) plus optional
+  # per-kind subsections that further override/add for just that kind.
+  profileType = lib.types.submodule {
+    options = {
+      tags = lib.mkOption {
+        type = lib.types.nullOr (lib.types.listOf lib.types.str);
+        default = null;
+        example = [ "languages/python" ];
+        description = ''
+          Profile-shared override tags — applied to both `skills` and
+          `memory` when this profile is selected. `null` inherits
+          from the top-level section; a list replaces it.
+        '';
+      };
+      extraTags = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [ "cli/clap" ];
+        description = ''
+          Profile-shared additive tags — unioned onto both kinds'
+          resolved tag lists.
+        '';
+      };
+      extraFiles = lib.mkOption {
+        type = lib.types.nullOr (lib.types.listOf lib.types.str);
+        default = null;
+        description = ''
+          Profile-shared override for the explicit-file list, applied
+          to both kinds.
+        '';
+      };
+      extraExtraFiles = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        description = ''
+          Profile-shared additive explicit-file list, applied to both
+          kinds.
+        '';
+      };
+      skills = lib.mkOption {
+        type = lib.types.nullOr sectionType;
+        default = null;
+        description = ''
+          Skills-only subsection of this profile. Overrides / adds on
+          top of the profile-shared fields above for the `skills` kind.
+        '';
+      };
+      memory = lib.mkOption {
+        type = lib.types.nullOr sectionType;
+        default = null;
+        description = ''
+          Memory-only subsection of this profile. Overrides / adds on
+          top of the profile-shared fields above for the `memory` kind.
+        '';
+      };
+    };
+  };
+
+  # Render one Nix-side section into the TOML attr form the launcher
+  # deserializes. Override fields (`tags`, `extraFiles`) are emitted
+  # whenever they are non-null — including `[]`, which the launcher reads
+  # as "explicit clear". Additive fields (`extraTags`, `extraExtraFiles`)
+  # are dropped when empty so the generated TOML stays minimal (empty and
+  # absent are equivalent for them).
+  sectionFields =
+    { tags, extraTags, extraFiles, extraExtraFiles }:
+    lib.optionalAttrs (tags != null) { inherit tags; }
+    // lib.optionalAttrs (extraTags != [ ]) { extra_tags = extraTags; }
+    // lib.optionalAttrs (extraFiles != null) { extra_files = extraFiles; }
+    // lib.optionalAttrs (extraExtraFiles != [ ]) { extra_extra_files = extraExtraFiles; };
+
+  sectionToToml = section:
+    if section == null then null else sectionFields section;
+
+  profileToToml = profile:
+    let
+      shared = sectionFields {
+        inherit (profile) tags extraTags extraFiles extraExtraFiles;
+      };
+      skillsToml = sectionToToml profile.skills;
+      memoryToml = sectionToToml profile.memory;
+    in
+    shared
+    // lib.optionalAttrs (skillsToml != null) { skills = skillsToml; }
+    // lib.optionalAttrs (memoryToml != null) { memory = memoryToml; };
+
   # Collect only the fields the user actually set. `null` means "leave
   # unset so the launcher falls back to its built-in default" — we drop
   # those rather than writing explicit nulls (which TOML can't represent
   # and `deny_unknown_fields` / the serde schema would reject anyway).
-  settings = lib.filterAttrs (_: v: v != null) {
+  settings = lib.filterAttrs (_: v: v != null && v != { }) {
     auth_proxy         = cfg.authProxy;
     auth_token_file    = cfg.authTokenFile;
     gh_token_file      = cfg.ghTokenFile;
@@ -18,6 +160,9 @@ let
     copy_git_on_init   = cfg.copyGitOnInit;
     copy_git_on_launch = cfg.copyGitOnLaunch;
     cgroup_parent      = cfg.cgroupParent;
+    skills             = sectionToToml cfg.skills;
+    memory             = sectionToToml cfg.memory;
+    profiles           = lib.mapAttrs (_: profileToToml) cfg.profiles;
   };
 
   # Merge the user's typed options with the escape-hatch `extraSettings`.
@@ -148,6 +293,64 @@ in
         to `--cgroup-parent` / `$CLAUDE_SANDBOX_CGROUP_PARENT`. Usually
         left unset so the launcher can auto-discover the slice written
         by the NixOS module at `/etc/claude-sandboxed/slice`.
+      '';
+    };
+
+    skills = lib.mkOption {
+      type = lib.types.nullOr sectionType;
+      default = null;
+      example = lib.literalExpression ''
+        {
+          tags = [ "misc" ];
+          extraFiles = [ "misc/readme-style.md" ];
+        }
+      '';
+      description = ''
+        Top-level `[skills]` section of the inherited-globals schema.
+        Acts as the outermost layer in the override chain: any
+        profile-level or profile-kind-level `tags` / `extraFiles`
+        replace this, while `extraTags` / `extraExtraFiles`
+        accumulate across every layer. See the README's
+        "Inherited globals" section for full semantics.
+      '';
+    };
+
+    memory = lib.mkOption {
+      type = lib.types.nullOr sectionType;
+      default = null;
+      example = lib.literalExpression ''
+        {
+          tags = [ "python/testing" ];
+        }
+      '';
+      description = ''
+        Top-level `[memory]` section. Same layering semantics as
+        `skills`, against the memory content tree.
+      '';
+    };
+
+    profiles = lib.mkOption {
+      type = lib.types.attrsOf profileType;
+      default = { };
+      example = lib.literalExpression ''
+        {
+          python-cli = {
+            tags = [ "languages/python" ];
+            extraTags = [ "cli/clap" ];
+            skills.extraFiles = [ "misc/readme-style.md" ];
+            memory.tags = [ "python/testing" ];
+          };
+        }
+      '';
+      description = ''
+        Named profiles for the inherited-globals system. Each entry
+        corresponds to a `[profiles.<name>]` block in the generated
+        `config.toml`; select one per launch with `--profile <name>`.
+
+        Each profile has the same four section-level fields as the
+        top-level `skills` / `memory` options (applied to BOTH kinds
+        when the profile is active) plus optional `skills` / `memory`
+        subsections that further override or add on a per-kind basis.
       '';
     };
 
