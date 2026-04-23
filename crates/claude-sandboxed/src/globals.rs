@@ -13,11 +13,19 @@
 //! carries the tag `languages/python`. Tag matching is prefix-at-segment-boundary:
 //! `languages` matches `languages/python` but not `languages-extended`.
 //!
-//! Profiles in the user config name a set of tags (and optional explicit
-//! files) per kind; callers can also mix in CLI-level tags/files additively.
-//! [`select`] resolves the union into concrete (host_path, relpath) pairs
-//! which `run.rs` then mounts one-by-one, read-only, into
-//! `/home/user/.claude/{skills,memory}/<relpath>`.
+//! ## Layered configuration
+//!
+//! Selection is assembled from up to three layers (from outermost to
+//! innermost):
+//!
+//! 1. top-level `[skills]` / `[memory]` — defaults for every launch
+//! 2. profile-level `[profiles.<name>]` — shared across both kinds
+//! 3. profile-kind-level `[profiles.<name>.skills]` / `[profiles.<name>.memory]`
+//!
+//! At each layer, `tags` and `extra_files` **override** the resolved value
+//! from above (last-specified wins), while `extra_tags` and
+//! `extra_extra_files` are always **unioned** with whatever came before.
+//! CLI flags then stack additively on top of the resolved config values.
 //!
 //! Per-file (not per-directory) bind mounts are intentional: the containing
 //! directories remain the sandbox's rw `.claude` mount, so the agent can
@@ -28,34 +36,84 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
-/// A named profile declared in the user config under `[profiles.<name>]`.
+/// One layer of tag/file selection for a single kind (skills or memory).
 ///
-/// The shared `tags` apply to both skills and memory; per-kind `skills` /
-/// `memory` subsections can add more tags and explicit files on top.
-#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Profile {
-    /// Tags applied to both skills and memory.
-    #[serde(default)]
-    pub tags: Vec<String>,
-    #[serde(default)]
-    pub skills: Option<Section>,
-    #[serde(default)]
-    pub memory: Option<Section>,
-}
-
-/// Per-kind subsection of a profile (`[profiles.<name>.skills]` or
-/// `[profiles.<name>.memory]`).
+/// `tags` and `extra_files` have OVERRIDE semantics (`None` means "inherit
+/// from above", `Some(v)` replaces — even `Some(vec![])` clears).
+/// `extra_tags` and `extra_extra_files` have ADDITIVE semantics — they are
+/// always unioned with whatever layer(s) above contributed.
 #[derive(Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Section {
+    /// Override. Replaces the inherited tag list entirely when present.
+    pub tags: Option<Vec<String>>,
+    /// Additive. Always unioned on top of the resolved `tags`.
     #[serde(default)]
-    pub tags: Vec<String>,
-    /// Paths of individual files to include, relative to the kind's content
-    /// directory (e.g. `misc/readme-style.md` under `skills/`). Absolute
-    /// paths and `..` components are rejected.
+    pub extra_tags: Vec<String>,
+    /// Override. Paths of individual files to include, relative to the kind's
+    /// content directory (e.g. `misc/readme-style.md` under `skills/`).
+    /// Absolute paths and `..` components are rejected at resolve time.
+    pub extra_files: Option<Vec<PathBuf>>,
+    /// Additive. Always unioned on top of the resolved `extra_files`.
     #[serde(default)]
-    pub extra_files: Vec<PathBuf>,
+    pub extra_extra_files: Vec<PathBuf>,
+}
+
+/// A named profile declared in the user config under `[profiles.<name>]`.
+///
+/// The profile's own `tags`/`extra_tags`/`extra_files`/`extra_extra_files`
+/// fields are SHARED between skills and memory — they form the middle
+/// layer in the override chain between the top-level `[skills]`/`[memory]`
+/// sections and the innermost per-kind `[profiles.<name>.skills]` /
+/// `[profiles.<name>.memory]` subsections.
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Profile {
+    /// Shared override. Applies to both skills and memory resolution.
+    pub tags: Option<Vec<String>>,
+    /// Shared additive. Applies to both skills and memory resolution.
+    #[serde(default)]
+    pub extra_tags: Vec<String>,
+    /// Shared override. Applies to both skills and memory resolution.
+    pub extra_files: Option<Vec<PathBuf>>,
+    /// Shared additive. Applies to both skills and memory resolution.
+    #[serde(default)]
+    pub extra_extra_files: Vec<PathBuf>,
+    pub skills: Option<Section>,
+    pub memory: Option<Section>,
+}
+
+/// Zero-copy borrow of one layer's selection fields, used internally by the
+/// layer-walking resolver so both `Section` and the shared fields of
+/// `Profile` can be fed through the same routine.
+#[derive(Copy, Clone)]
+struct SectionView<'a> {
+    tags: Option<&'a [String]>,
+    extra_tags: &'a [String],
+    extra_files: Option<&'a [PathBuf]>,
+    extra_extra_files: &'a [PathBuf],
+}
+
+impl Section {
+    fn view(&self) -> SectionView<'_> {
+        SectionView {
+            tags: self.tags.as_deref(),
+            extra_tags: &self.extra_tags,
+            extra_files: self.extra_files.as_deref(),
+            extra_extra_files: &self.extra_extra_files,
+        }
+    }
+}
+
+impl Profile {
+    fn shared_view(&self) -> SectionView<'_> {
+        SectionView {
+            tags: self.tags.as_deref(),
+            extra_tags: &self.extra_tags,
+            extra_files: self.extra_files.as_deref(),
+            extra_extra_files: &self.extra_extra_files,
+        }
+    }
 }
 
 /// Resolved set of files to mount into the sandbox.
@@ -82,59 +140,93 @@ pub fn globals_root() -> Option<PathBuf> {
         .map(|h| PathBuf::from(h).join(".local").join("share").join("claude-sandboxed"))
 }
 
-/// Resolve the union of profile + CLI additions into concrete files.
+/// Resolve the union of config layers + CLI additions into concrete files.
+///
+/// The three config layers for each kind are walked in order
+/// (top-level → profile-shared → profile-kind). `tags` / `extra_files`
+/// overrides are last-wins; `extra_tags` / `extra_extra_files` are
+/// accumulated across every layer. CLI lists are appended last.
 ///
 /// `root` is typically `globals_root().as_deref()`. When it is `None`, or
 /// when the `skills/` / `memory/` subdirectory of `root` does not exist,
 /// any tag/file requests for that kind are a hard error — if the user
 /// asked for something concrete we refuse to silently do nothing. With
 /// no requests at all the function returns an empty `Selected`.
+#[allow(clippy::too_many_arguments)]
 pub fn select(
     root: Option<&Path>,
+    top_skills: Option<&Section>,
+    top_memory: Option<&Section>,
     profile: Option<&Profile>,
-    skill_tags: &[String],
-    memory_tags: &[String],
-    skill_files: &[PathBuf],
-    memory_files: &[PathBuf],
+    skill_tags_cli: &[String],
+    memory_tags_cli: &[String],
+    skill_files_cli: &[PathBuf],
+    memory_files_cli: &[PathBuf],
 ) -> Result<Selected, crate::Error> {
-    // Union shared profile tags with kind-specific tags and CLI additions.
-    let (prof_shared, prof_skills, prof_memory) = match profile {
-        Some(p) => (p.tags.as_slice(), p.skills.as_ref(), p.memory.as_ref()),
-        None => (&[][..], None, None),
-    };
+    // Assemble the per-kind layer stacks (outermost first). `flatten()` in
+    // `resolve_layers` skips absent layers.
+    let profile_shared = profile.map(Profile::shared_view);
+    let skill_layers: [Option<SectionView<'_>>; 3] = [
+        top_skills.map(Section::view),
+        profile_shared,
+        profile.and_then(|p| p.skills.as_ref()).map(Section::view),
+    ];
+    let memory_layers: [Option<SectionView<'_>>; 3] = [
+        top_memory.map(Section::view),
+        profile_shared,
+        profile.and_then(|p| p.memory.as_ref()).map(Section::view),
+    ];
 
-    let mut all_skill_tags: Vec<&str> = prof_shared.iter().map(String::as_str).collect();
-    if let Some(s) = prof_skills {
-        all_skill_tags.extend(s.tags.iter().map(String::as_str));
-    }
-    all_skill_tags.extend(skill_tags.iter().map(String::as_str));
+    let (mut skill_tags, mut skill_files) = resolve_layers(&skill_layers);
+    let (mut memory_tags, mut memory_files) = resolve_layers(&memory_layers);
 
-    let mut all_memory_tags: Vec<&str> = prof_shared.iter().map(String::as_str).collect();
-    if let Some(m) = prof_memory {
-        all_memory_tags.extend(m.tags.iter().map(String::as_str));
-    }
-    all_memory_tags.extend(memory_tags.iter().map(String::as_str));
+    // CLI flags are additive — same semantics as `extra_*` accumulators,
+    // just applied after all config layers are merged.
+    skill_tags.extend(skill_tags_cli.iter().cloned());
+    skill_files.extend(skill_files_cli.iter().cloned());
+    memory_tags.extend(memory_tags_cli.iter().cloned());
+    memory_files.extend(memory_files_cli.iter().cloned());
 
-    let mut all_skill_files: Vec<&Path> = skill_files.iter().map(PathBuf::as_path).collect();
-    if let Some(s) = prof_skills {
-        all_skill_files.extend(s.extra_files.iter().map(PathBuf::as_path));
-    }
-
-    let mut all_memory_files: Vec<&Path> = memory_files.iter().map(PathBuf::as_path).collect();
-    if let Some(m) = prof_memory {
-        all_memory_files.extend(m.extra_files.iter().map(PathBuf::as_path));
-    }
-
-    for t in all_skill_tags.iter().chain(all_memory_tags.iter()) {
+    for t in skill_tags.iter().chain(memory_tags.iter()) {
         if t.is_empty() {
             return Err("empty tag string is not allowed".into());
         }
     }
 
-    let skills = resolve_kind(root, "skills", &all_skill_tags, &all_skill_files)?;
-    let memory = resolve_kind(root, "memory", &all_memory_tags, &all_memory_files)?;
+    let skill_tag_refs: Vec<&str> = skill_tags.iter().map(String::as_str).collect();
+    let skill_file_refs: Vec<&Path> = skill_files.iter().map(PathBuf::as_path).collect();
+    let memory_tag_refs: Vec<&str> = memory_tags.iter().map(String::as_str).collect();
+    let memory_file_refs: Vec<&Path> = memory_files.iter().map(PathBuf::as_path).collect();
+
+    let skills = resolve_kind(root, "skills", &skill_tag_refs, &skill_file_refs)?;
+    let memory = resolve_kind(root, "memory", &memory_tag_refs, &memory_file_refs)?;
 
     Ok(Selected { skills, memory })
+}
+
+/// Reduce a stack of layers into a single `(tags, files)` pair.
+///
+/// Pass 1 resolves override fields (`tags`, `extra_files`) — each present
+/// layer replaces whatever was accumulated so far, so the deepest-specified
+/// value wins. Pass 2 accumulates the additive fields (`extra_tags`,
+/// `extra_extra_files`) in layer order. Per-layer absence (`None` in the
+/// outer slice) means the layer doesn't contribute at all.
+fn resolve_layers(layers: &[Option<SectionView<'_>>]) -> (Vec<String>, Vec<PathBuf>) {
+    let mut tags: Vec<String> = Vec::new();
+    let mut files: Vec<PathBuf> = Vec::new();
+    for layer in layers.iter().flatten() {
+        if let Some(t) = layer.tags {
+            tags = t.to_vec();
+        }
+        if let Some(f) = layer.extra_files {
+            files = f.to_vec();
+        }
+    }
+    for layer in layers.iter().flatten() {
+        tags.extend(layer.extra_tags.iter().cloned());
+        files.extend(layer.extra_extra_files.iter().cloned());
+    }
+    (tags, files)
 }
 
 fn resolve_kind(
@@ -297,6 +389,8 @@ mod tests {
     use super::*;
     use std::fs;
 
+    // ---- Tag-match primitive ------------------------------------------------
+
     #[test]
     fn tag_match_exact() {
         assert!(tag_matches("languages/python", "languages/python"));
@@ -322,25 +416,34 @@ mod tests {
         assert!(!tag_matches("", "any"));
     }
 
+    // ---- `select` behavior --------------------------------------------------
+
+    fn select_simple(
+        root: Option<&Path>,
+        profile: Option<&Profile>,
+        skill_tags: &[&str],
+        skill_files: &[&str],
+    ) -> Result<Selected, crate::Error> {
+        let tags: Vec<String> = skill_tags.iter().map(|s| s.to_string()).collect();
+        let files: Vec<PathBuf> = skill_files.iter().map(PathBuf::from).collect();
+        select(root, None, None, profile, &tags, &[], &files, &[])
+    }
+
     #[test]
     fn empty_tag_rejected() {
-        let err = select(None, None, &["".into()], &[], &[], &[])
-            .unwrap_err()
-            .to_string();
+        let err = select_simple(None, None, &[""], &[]).unwrap_err().to_string();
         assert!(err.contains("empty tag"), "got: {err}");
     }
 
     #[test]
     fn nothing_requested_is_empty_noop_even_without_root() {
-        let s = select(None, None, &[], &[], &[], &[]).unwrap();
+        let s = select_simple(None, None, &[], &[]).unwrap();
         assert!(s.skills.is_empty() && s.memory.is_empty());
     }
 
     #[test]
     fn request_without_root_errors() {
-        let err = select(None, None, &["foo".into()], &[], &[], &[])
-            .unwrap_err()
-            .to_string();
+        let err = select_simple(None, None, &["foo"], &[]).unwrap_err().to_string();
         assert!(err.contains("no $XDG_DATA_HOME"), "got: {err}");
     }
 
@@ -368,15 +471,7 @@ mod tests {
     #[test]
     fn walk_selects_tag_subtree() {
         let tmp = fixture();
-        let s = select(
-            Some(tmp.path()),
-            None,
-            &["languages".into()],
-            &[],
-            &[],
-            &[],
-        )
-        .unwrap();
+        let s = select_simple(Some(tmp.path()), None, &["languages"], &[]).unwrap();
         let got = relpaths(&s.skills);
         assert_eq!(
             got,
@@ -388,28 +483,18 @@ mod tests {
     #[test]
     fn exact_tag_only_matches_that_subtree() {
         let tmp = fixture();
-        let s = select(
-            Some(tmp.path()),
-            None,
-            &["languages/python".into()],
-            &[],
-            &[],
-            &[],
-        )
-        .unwrap();
+        let s = select_simple(Some(tmp.path()), None, &["languages/python"], &[]).unwrap();
         assert_eq!(relpaths(&s.skills), vec!["languages/python/typing.md"]);
     }
 
     #[test]
     fn extra_files_resolved_and_deduped_against_tags() {
         let tmp = fixture();
-        let s = select(
+        let s = select_simple(
             Some(tmp.path()),
             None,
-            &["languages/python".into()],
-            &[],
-            &[PathBuf::from("languages/python/typing.md"), PathBuf::from("misc/readme.md")],
-            &[],
+            &["languages/python"],
+            &["languages/python/typing.md", "misc/readme.md"],
         )
         .unwrap();
         let got = relpaths(&s.skills);
@@ -418,77 +503,41 @@ mod tests {
     }
 
     #[test]
-    fn profile_shared_and_section_tags_union() {
-        let tmp = fixture();
-        let prof = Profile {
-            tags: vec!["cli".into()],
-            skills: Some(Section {
-                tags: vec!["languages/rust".into()],
-                extra_files: vec![],
-            }),
-            memory: None,
-        };
-        let s = select(Some(tmp.path()), Some(&prof), &[], &[], &[], &[]).unwrap();
-        let got = relpaths(&s.skills);
-        assert_eq!(got, vec!["cli/clap/derive.md", "languages/rust/traits.md"]);
-    }
-
-    #[test]
     fn missing_extra_file_errors() {
         let tmp = fixture();
-        let err = select(
-            Some(tmp.path()),
-            None,
-            &[],
-            &[],
-            &[PathBuf::from("does/not/exist.md")],
-            &[],
-        )
-        .unwrap_err()
-        .to_string();
+        let err = select_simple(Some(tmp.path()), None, &[], &["does/not/exist.md"])
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("not found"), "got: {err}");
     }
 
     #[test]
     fn absolute_extra_file_rejected() {
         let tmp = fixture();
-        let err = select(
-            Some(tmp.path()),
-            None,
-            &[],
-            &[],
-            &[PathBuf::from("/etc/passwd")],
-            &[],
-        )
-        .unwrap_err()
-        .to_string();
+        let err = select_simple(Some(tmp.path()), None, &[], &["/etc/passwd"])
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("absolute"), "got: {err}");
     }
 
     #[test]
     fn parent_dir_traversal_rejected() {
         let tmp = fixture();
-        let err = select(
-            Some(tmp.path()),
-            None,
-            &[],
-            &[],
-            &[PathBuf::from("../outside.md")],
-            &[],
-        )
-        .unwrap_err()
-        .to_string();
+        let err = select_simple(Some(tmp.path()), None, &[], &["../outside.md"])
+            .unwrap_err()
+            .to_string();
         assert!(err.contains(".."), "got: {err}");
     }
 
     #[test]
     fn missing_kind_dir_with_request_errors() {
-        // No `memory/` under root.
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join("skills/foo")).unwrap();
         fs::write(tmp.path().join("skills/foo/x.md"), "").unwrap();
         let err = select(
             Some(tmp.path()),
+            None,
+            None,
             None,
             &[],
             &["anything".into()],
@@ -505,33 +554,322 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join("skills/foo")).unwrap();
         fs::write(tmp.path().join("skills/foo/x.md"), "").unwrap();
-        // Only request skills; memory/ missing but that's fine.
+        let s = select_simple(Some(tmp.path()), None, &["foo"], &[]).unwrap();
+        assert_eq!(relpaths(&s.skills), vec!["foo/x.md"]);
+        assert!(s.memory.is_empty());
+    }
+
+    // ---- Layered override / extra_tag accumulation --------------------------
+
+    #[test]
+    fn top_level_section_applies_when_no_profile() {
+        let tmp = fixture();
+        let top = Section {
+            tags: Some(vec!["languages/python".into()]),
+            ..Section::default()
+        };
         let s = select(
             Some(tmp.path()),
+            Some(&top),
             None,
-            &["foo".into()],
+            None,
+            &[],
             &[],
             &[],
             &[],
         )
         .unwrap();
-        assert_eq!(relpaths(&s.skills), vec!["foo/x.md"]);
+        assert_eq!(relpaths(&s.skills), vec!["languages/python/typing.md"]);
+    }
+
+    #[test]
+    fn profile_shared_tags_override_top_level_tags() {
+        let tmp = fixture();
+        let top = Section {
+            tags: Some(vec!["languages/python".into()]),
+            ..Section::default()
+        };
+        let prof = Profile {
+            tags: Some(vec!["cli".into()]),
+            ..Profile::default()
+        };
+        let s = select(
+            Some(tmp.path()),
+            Some(&top),
+            None,
+            Some(&prof),
+            &[],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        // Profile `tags` replaced top-level `tags` entirely — no python.
+        assert_eq!(relpaths(&s.skills), vec!["cli/clap/derive.md"]);
+    }
+
+    #[test]
+    fn profile_kind_tags_override_profile_shared_tags() {
+        let tmp = fixture();
+        let prof = Profile {
+            tags: Some(vec!["cli".into()]),
+            skills: Some(Section {
+                tags: Some(vec!["languages/rust".into()]),
+                ..Section::default()
+            }),
+            ..Profile::default()
+        };
+        let s = select(
+            Some(tmp.path()),
+            None,
+            None,
+            Some(&prof),
+            &[],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        // For skills, profile.skills.tags overrides profile.tags ("cli" dropped).
+        assert_eq!(relpaths(&s.skills), vec!["languages/rust/traits.md"]);
+    }
+
+    #[test]
+    fn profile_kind_absent_inherits_profile_shared_tags_for_that_kind() {
+        let tmp = fixture();
+        let prof = Profile {
+            tags: Some(vec!["cli".into()]),
+            // skills layer absent → inherit "cli" from shared
+            // memory layer absent → same, but no memory/cli/... → empty
+            ..Profile::default()
+        };
+        let s = select(
+            Some(tmp.path()),
+            None,
+            None,
+            Some(&prof),
+            &[],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(relpaths(&s.skills), vec!["cli/clap/derive.md"]);
         assert!(s.memory.is_empty());
     }
 
     #[test]
-    fn profile_memory_section_routes_to_memory() {
+    fn extra_tags_accumulate_across_all_layers() {
+        let tmp = fixture();
+        let top = Section {
+            extra_tags: vec!["languages/python".into()],
+            ..Section::default()
+        };
+        let prof = Profile {
+            extra_tags: vec!["cli".into()],
+            skills: Some(Section {
+                extra_tags: vec!["languages/rust".into()],
+                ..Section::default()
+            }),
+            ..Profile::default()
+        };
+        let s = select(
+            Some(tmp.path()),
+            Some(&top),
+            None,
+            Some(&prof),
+            &[],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            relpaths(&s.skills),
+            vec![
+                "cli/clap/derive.md",
+                "languages/python/typing.md",
+                "languages/rust/traits.md",
+            ]
+        );
+    }
+
+    #[test]
+    fn override_tags_then_accumulate_extra_tags() {
+        let tmp = fixture();
+        let top = Section {
+            tags: Some(vec!["languages".into()]), // both python+rust initially
+            ..Section::default()
+        };
+        let prof = Profile {
+            // Profile overrides base tags to just cli/clap, then adds rust via extra_tags.
+            skills: Some(Section {
+                tags: Some(vec!["cli".into()]),
+                extra_tags: vec!["languages/rust".into()],
+                ..Section::default()
+            }),
+            ..Profile::default()
+        };
+        let s = select(
+            Some(tmp.path()),
+            Some(&top),
+            None,
+            Some(&prof),
+            &[],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        // Top "languages" dropped by profile.skills override; cli + rust remain.
+        assert_eq!(
+            relpaths(&s.skills),
+            vec!["cli/clap/derive.md", "languages/rust/traits.md"]
+        );
+    }
+
+    #[test]
+    fn cli_flags_stack_additively_on_top() {
         let tmp = fixture();
         let prof = Profile {
-            tags: vec![],
-            skills: None,
-            memory: Some(Section {
-                tags: vec!["python/testing".into()],
-                extra_files: vec![],
+            skills: Some(Section {
+                tags: Some(vec!["languages/python".into()]),
+                ..Section::default()
             }),
+            ..Profile::default()
         };
-        let s = select(Some(tmp.path()), Some(&prof), &[], &[], &[], &[]).unwrap();
+        let s = select(
+            Some(tmp.path()),
+            None,
+            None,
+            Some(&prof),
+            &["cli".into()],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            relpaths(&s.skills),
+            vec!["cli/clap/derive.md", "languages/python/typing.md"]
+        );
+    }
+
+    #[test]
+    fn extra_files_override_then_extra_extra_files_accumulate() {
+        let tmp = fixture();
+        let top = Section {
+            extra_files: Some(vec![PathBuf::from("misc/readme.md")]),
+            extra_extra_files: vec![PathBuf::from("cli/clap/derive.md")],
+            ..Section::default()
+        };
+        let prof = Profile {
+            skills: Some(Section {
+                // Override drops top's misc/readme.md → only typing.md from override.
+                extra_files: Some(vec![PathBuf::from("languages/python/typing.md")]),
+                // Additive — layered on top of everyone's extra_extra_files.
+                extra_extra_files: vec![PathBuf::from("languages/rust/traits.md")],
+                ..Section::default()
+            }),
+            ..Profile::default()
+        };
+        let s = select(
+            Some(tmp.path()),
+            Some(&top),
+            None,
+            Some(&prof),
+            &[],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        let got = relpaths(&s.skills);
+        assert_eq!(
+            got,
+            vec![
+                "cli/clap/derive.md",            // from top.extra_extra_files
+                "languages/python/typing.md",    // from profile.skills.extra_files (override)
+                "languages/rust/traits.md",      // from profile.skills.extra_extra_files (add)
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_override_tags_clears_inherited() {
+        let tmp = fixture();
+        let top = Section {
+            tags: Some(vec!["languages".into()]),
+            ..Section::default()
+        };
+        let prof = Profile {
+            skills: Some(Section {
+                tags: Some(vec![]), // explicit empty → clear
+                ..Section::default()
+            }),
+            ..Profile::default()
+        };
+        let s = select(
+            Some(tmp.path()),
+            Some(&top),
+            None,
+            Some(&prof),
+            &[],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
         assert!(s.skills.is_empty());
+    }
+
+    #[test]
+    fn profile_memory_section_routes_to_memory_only() {
+        let tmp = fixture();
+        let prof = Profile {
+            memory: Some(Section {
+                tags: Some(vec!["python/testing".into()]),
+                ..Section::default()
+            }),
+            ..Profile::default()
+        };
+        let s = select(
+            Some(tmp.path()),
+            None,
+            None,
+            Some(&prof),
+            &[],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert!(s.skills.is_empty());
+        assert_eq!(relpaths(&s.memory), vec!["python/testing/pytest.md"]);
+    }
+
+    #[test]
+    fn profile_shared_tags_apply_to_both_kinds() {
+        let tmp = fixture();
+        let prof = Profile {
+            // Shared tag "cli" matches skills/cli but no memory/cli exists.
+            // And "python/testing" matches memory but no skills/python/testing
+            // either — each layer is a pure union on its kind's tree.
+            extra_tags: vec!["cli".into(), "python/testing".into()],
+            ..Profile::default()
+        };
+        let s = select(
+            Some(tmp.path()),
+            None,
+            None,
+            Some(&prof),
+            &[],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(relpaths(&s.skills), vec!["cli/clap/derive.md"]);
         assert_eq!(relpaths(&s.memory), vec!["python/testing/pytest.md"]);
     }
 }

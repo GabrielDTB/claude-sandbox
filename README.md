@@ -253,39 +253,59 @@ Skills and memory files can be shared across sandboxes instead of being re-deriv
 
 The directory chain between `skills/` (or `memory/`) and a file becomes the file's implicit **tag** — e.g. `skills/languages/python/typing.md` carries the tag `languages/python`. Tag matching is **prefix-at-segment-boundary**: the tag `languages` matches `languages/python` and `languages/rust`, but not `languages-extended`. The separator is `/`.
 
-### Profiles
+### Layered configuration
 
-Declare named sets of tags (and optional explicit files) in `config.toml` under `[profiles.<name>]`:
+Selection is assembled from up to three layers (outermost → innermost):
+
+1. **top-level** `[skills]` / `[memory]` — defaults applied to every launch
+2. **profile-shared** `[profiles.<name>]` — applied to both kinds when the profile is selected
+3. **profile-kind** `[profiles.<name>.skills]` / `[profiles.<name>.memory]` — most specific
+
+Every layer can set four fields:
+
+| Field | Semantics |
+| --- | --- |
+| `tags` | **Override.** When present, replaces the inherited tag list entirely (even `tags = []` clears). |
+| `extra_tags` | **Additive.** Always unioned with whatever was resolved above. |
+| `extra_files` | **Override.** Replaces the inherited explicit-file list. Paths are relative to the kind's content directory (no absolute, no `..`). |
+| `extra_extra_files` | **Additive.** Always unioned with whatever was resolved above. Yes, the `extra_extra_` is intentional — `extra_files` was already taken for the override list. |
+
+Deepest-specified `tags`/`extra_files` win. All layers' `extra_tags` and `extra_extra_files` are concatenated. CLI flags then stack additively on top.
 
 ```toml
+# Applied to every launch
+[skills]
+tags       = ["misc"]
+extra_tags = []
+
+[memory]
+tags = []
+
+# Pick with --profile python-cli
 [profiles.python-cli]
-tags = ["languages/python"]       # applied to both skills and memory
+tags       = ["languages/python"]   # overrides top-level for BOTH kinds
+extra_tags = ["cli/clap"]           # added to the resolved tags
 
 [profiles.python-cli.skills]
-tags = ["cli/clap"]               # unioned with the shared `tags` above
-extra_files = ["misc/readme-style.md"]
+tags        = ["cli/clap"]                  # overrides profile-shared for skills
+extra_files = ["misc/readme-style.md"]      # overrides top-level extra_files
 
 [profiles.python-cli.memory]
-tags = ["python/testing"]
-extra_files = []
+tags              = ["python/testing"]
+extra_extra_files = []
 ```
 
-Selection rules:
-
-- A profile's top-level `tags` apply to **both** skills and memory.
-- Per-kind subsections (`[profiles.<name>.skills]`, `[profiles.<name>.memory]`) add their own `tags` unioned on top, and optional `extra_files` holding paths relative to that kind's content directory (no absolute paths, no `..`).
-- Unknown keys in a profile or subsection are rejected (`deny_unknown_fields`).
-- There is no profile composition — a launch selects at most one profile. CLI flags stack additively on top.
+Unknown keys at any layer are rejected (`deny_unknown_fields`). A launch selects at most one profile — no profile composition.
 
 ### Selecting per launch
 
 | Flag | Effect |
 | --- | --- |
-| `--profile NAME` | Use `[profiles.NAME]` from `config.toml`. Unknown name is a hard error before podman runs. |
-| `--skill-tag TAG` / `--memory-tag TAG` | Add an ad-hoc tag (repeatable), prefix-matched the same way profile tags are. |
-| `--skill-file PATH` / `--memory-file PATH` | Add a specific file (repeatable), relative to the kind's content dir. |
+| `--profile NAME` | Select `[profiles.NAME]` from `config.toml` as the middle + inner layers. Unknown name is a hard error before podman runs. |
+| `--skill-tag TAG` / `--memory-tag TAG` | Add an ad-hoc tag (repeatable), stacked additively on top of the resolved config values. |
+| `--skill-file PATH` / `--memory-file PATH` | Add a specific file (repeatable), same additive behavior as `extra_extra_files`. |
 
-The three mechanisms are additive and deduplicated: a file matching both a profile tag and an explicit `--skill-file` mounts exactly once.
+All mechanisms are deduplicated: a file matching both a tag walk and an explicit file entry mounts exactly once.
 
 ### How they reach the sandbox
 

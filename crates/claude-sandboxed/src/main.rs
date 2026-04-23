@@ -128,6 +128,8 @@ fn run() -> Result<ExitCode, Error> {
     let globals_root = globals::globals_root();
     let selected_globals = globals::select(
         globals_root.as_deref(),
+        cfg.skills.as_ref(),
+        cfg.memory.as_ref(),
         profile,
         &cli.skill_tag,
         &cli.memory_tag,

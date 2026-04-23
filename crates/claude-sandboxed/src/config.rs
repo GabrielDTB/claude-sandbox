@@ -33,7 +33,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::globals::Profile;
+use crate::globals::{Profile, Section};
 
 /// Annotated TOML reference for the user-global config. Printed by
 /// `claude-sandboxed --print-default-config`, and intended to be pipeable
@@ -127,24 +127,50 @@ pub const REFERENCE: &str = "\
 # `languages/python`. Tag matching is prefix-at-segment-boundary: the tag
 # `languages` matches `languages/python` but not `languages-extended`.
 #
-# Define profiles here and select one per launch with --profile <name>, or
-# mix in ad-hoc items with --skill-tag / --memory-tag / --skill-file /
-# --memory-file (all repeatable, layered on top of the profile).
+# Selection is layered, with three levels (outermost to innermost):
 #
-# Shared `tags` apply to both skills and memory; per-kind subsections add
-# more tags and specific files on top. `extra_files` holds paths relative
-# to the kind's content directory (no leading `/`, no `..`).
+#   1. top-level [skills] / [memory]          — default for every launch
+#   2. [profiles.<name>]                      — shared across both kinds
+#   3. [profiles.<name>.skills] / .memory     — per-kind, most specific
+#
+# At every level you can set four fields:
+#
+#   tags              — OVERRIDE. Replaces the inherited tag list entirely.
+#   extra_tags        — ADDITIVE. Unioned with whatever's above.
+#   extra_files       — OVERRIDE. Replaces the inherited explicit-file list.
+#   extra_extra_files — ADDITIVE. Unioned with whatever's above.
+#
+# CLI flags --skill-tag / --memory-tag / --skill-file / --memory-file
+# (all repeatable) stack additively on top of the resolved config values.
+# Select a profile per launch with --profile <name>.
+#
+# Paths in extra_files / extra_extra_files are relative to the kind's
+# content directory (e.g. `languages/python/typing.md` resolves under
+# `skills/` or `memory/`). Absolute paths and `..` are rejected.
 
+# Defaults applied to every launch, regardless of --profile.
+# [skills]
+# tags              = [\"misc\"]
+# extra_tags        = []
+# extra_files       = []
+# extra_extra_files = []
+#
+# [memory]
+# tags              = []
+# extra_files       = []
+
+# A named profile. Select with --profile python-cli.
 # [profiles.python-cli]
-# tags = [\"languages/python\"]
+# tags       = [\"languages/python\"]   # overrides top-level for BOTH kinds
+# extra_tags = [\"cli/clap\"]           # added on top of the resolved tags
 #
 # [profiles.python-cli.skills]
-# tags = [\"cli/clap\"]
+# tags        = [\"cli/clap\"]          # overrides the profile-shared tags for skills
 # extra_files = [\"misc/readme-style.md\"]
 #
 # [profiles.python-cli.memory]
-# tags = [\"python/testing\"]
-# extra_files = []
+# tags              = [\"python/testing\"]
+# extra_extra_files = []
 ";
 
 #[derive(Debug, Default, Deserialize)]
@@ -185,6 +211,14 @@ pub struct Config {
     /// will be placed under. When unset, the launcher auto-discovers a
     /// user slice named `claude-sandboxed.slice` if one exists.
     pub cgroup_parent: Option<String>,
+    /// Default skills-globals selection applied to every launch. Acts as
+    /// the outermost layer in the override chain — any profile-level or
+    /// profile-kind-level `tags` / `extra_files` replace these, while
+    /// `extra_tags` / `extra_extra_files` accumulate. See `globals.rs`.
+    pub skills: Option<Section>,
+    /// Default memory-globals selection applied to every launch; same
+    /// layering semantics as `skills`.
+    pub memory: Option<Section>,
     /// Named profiles for inherited skills/memory. Keyed by profile name;
     /// selected at the CLI with `--profile <name>`. See `globals.rs` for
     /// the matching semantics.
@@ -428,6 +462,8 @@ mod tests {
         assert!(c.copy_git_on_init.is_none());
         assert!(c.copy_git_on_launch.is_none());
         assert!(c.cgroup_parent.is_none());
+        assert!(c.skills.is_none());
+        assert!(c.memory.is_none());
         assert!(c.profiles.is_empty());
     }
 
@@ -485,26 +521,38 @@ mod tests {
         let f = write_config(
             r#"
                 [profiles.python-cli]
-                tags = ["languages/python"]
+                tags       = ["languages/python"]
+                extra_tags = ["shared-extra"]
 
                 [profiles.python-cli.skills]
-                tags = ["cli/clap"]
-                extra_files = ["misc/readme.md"]
+                tags              = ["cli/clap"]
+                extra_tags        = ["more/skills"]
+                extra_files       = ["misc/readme.md"]
+                extra_extra_files = ["misc/other.md"]
 
                 [profiles.python-cli.memory]
-                tags = ["python/testing"]
-                extra_files = []
+                tags              = ["python/testing"]
+                extra_files       = []
             "#,
         );
         let c = parse_at(f.path()).unwrap();
         let p = c.profiles.get("python-cli").expect("profile missing");
-        assert_eq!(p.tags, vec!["languages/python".to_string()]);
+        assert_eq!(p.tags.as_deref(), Some(&["languages/python".to_string()][..]));
+        assert_eq!(p.extra_tags, vec!["shared-extra".to_string()]);
+        assert!(p.extra_files.is_none());
+        assert!(p.extra_extra_files.is_empty());
         let skills = p.skills.as_ref().unwrap();
-        assert_eq!(skills.tags, vec!["cli/clap".to_string()]);
-        assert_eq!(skills.extra_files, vec![PathBuf::from("misc/readme.md")]);
+        assert_eq!(skills.tags.as_deref(), Some(&["cli/clap".to_string()][..]));
+        assert_eq!(skills.extra_tags, vec!["more/skills".to_string()]);
+        assert_eq!(
+            skills.extra_files.as_deref(),
+            Some(&[PathBuf::from("misc/readme.md")][..])
+        );
+        assert_eq!(skills.extra_extra_files, vec![PathBuf::from("misc/other.md")]);
         let memory = p.memory.as_ref().unwrap();
-        assert_eq!(memory.tags, vec!["python/testing".to_string()]);
-        assert!(memory.extra_files.is_empty());
+        assert_eq!(memory.tags.as_deref(), Some(&["python/testing".to_string()][..]));
+        // `extra_files = []` is explicit-empty override, distinct from absent.
+        assert_eq!(memory.extra_files.as_deref(), Some(&[][..]));
     }
 
     #[test]
@@ -517,9 +565,52 @@ mod tests {
         );
         let c = parse_at(f.path()).unwrap();
         let p = c.profiles.get("bare").unwrap();
-        assert_eq!(p.tags, vec!["lang".to_string()]);
+        assert_eq!(p.tags.as_deref(), Some(&["lang".to_string()][..]));
+        assert!(p.extra_tags.is_empty());
+        assert!(p.extra_files.is_none());
         assert!(p.skills.is_none());
         assert!(p.memory.is_none());
+    }
+
+    #[test]
+    fn parses_top_level_skills_and_memory() {
+        let f = write_config(
+            r#"
+                [skills]
+                tags        = ["languages"]
+                extra_tags  = ["cli"]
+                extra_files = ["misc/readme.md"]
+
+                [memory]
+                tags = ["python/testing"]
+            "#,
+        );
+        let c = parse_at(f.path()).unwrap();
+        let skills = c.skills.as_ref().expect("top-level skills missing");
+        assert_eq!(skills.tags.as_deref(), Some(&["languages".to_string()][..]));
+        assert_eq!(skills.extra_tags, vec!["cli".to_string()]);
+        assert_eq!(
+            skills.extra_files.as_deref(),
+            Some(&[PathBuf::from("misc/readme.md")][..])
+        );
+        let memory = c.memory.as_ref().unwrap();
+        assert_eq!(memory.tags.as_deref(), Some(&["python/testing".to_string()][..]));
+        assert!(memory.extra_files.is_none());
+    }
+
+    #[test]
+    fn unknown_top_level_skills_field_rejected() {
+        // Same deny-unknown behavior at the top level — guard against typos
+        // like "extras" or "extraTags".
+        let f = write_config(
+            r#"
+                [skills]
+                tags   = ["x"]
+                extras = ["y"]
+            "#,
+        );
+        let err = parse_at(f.path()).unwrap_err().to_string();
+        assert!(err.contains("extras"), "got: {err}");
     }
 
     #[test]
