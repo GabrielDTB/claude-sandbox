@@ -65,7 +65,9 @@ pub struct Cli {
     )]
     pub cgroup_parent: Option<String>,
 
-    /// Pass through GPU devices (requires nvidia-container-toolkit)
+    /// Pass through GPU devices. Auto-detects vendor: AMD (`/dev/kfd` +
+    /// `/dev/dri`) if `/dev/kfd` exists on the host, otherwise NVIDIA via
+    /// `nvidia-container-toolkit` (`nvidia.com/gpu=all`).
     #[arg(long)]
     pub gpu: bool,
 

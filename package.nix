@@ -107,7 +107,15 @@ let
       done
 
       if [ "''${GPU:-0}" = 1 ]; then
-        PODMAN_ARGS+=(--device nvidia.com/gpu=all)
+        # Auto-detect vendor: AMD ROCm exposes /dev/kfd on the host; if it's
+        # there, hand through /dev/kfd + /dev/dri. Otherwise fall back to the
+        # nvidia-container-toolkit CDI device. Keep this in lockstep with
+        # crates/claude-sandboxed/src/run.rs.
+        if [ -e /dev/kfd ]; then
+          PODMAN_ARGS+=(--device /dev/kfd --device /dev/dri)
+        else
+          PODMAN_ARGS+=(--device nvidia.com/gpu=all)
+        fi
       fi
 
       if [ "''${DEV_ENV:-0}" = 1 ] && [ -f "$SANDBOX_DIR/dev-closure-paths" ]; then

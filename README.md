@@ -169,7 +169,7 @@ claude-sandboxed <workspace> [options] [-- claude-args...]
 | `--cpus N` | `CPU_LIMIT` | Per-container CPU cap (passed to `podman --cpus`). Default: unlimited. |
 | `--memory SIZE` | `MEMORY_LIMIT` | Per-container memory cap. Also sets `--memory-swap=SIZE` so swap can't double the budget. Default: unlimited. |
 | `--cgroup-parent SLICE` | `CLAUDE_SANDBOX_CGROUP_PARENT` | Place the container under this cgroup (typically a systemd user slice). Auto-discovered from `/etc/claude-sandboxed/slice` when unset; see [Resource limits](#resource-limits). |
-| `--gpu` | `GPU=1` | Pass NVIDIA GPUs through via `nvidia-container-toolkit`. |
+| `--gpu` | `GPU=1` | Pass GPUs through. Auto-detects vendor: AMD (`/dev/kfd` + `/dev/dri`) if `/dev/kfd` exists on the host, otherwise NVIDIA via `nvidia-container-toolkit` (`nvidia.com/gpu=all`). |
 | `--anonymous` | — | Suppress identity-leaking config (GH token). |
 | `--no-tools` | — | Use the minimal container image (core packages only, no dev tools). |
 | `--permissive` | — | Pass `--dangerously-skip-permissions` to `claude` inside. Combined with `permissive = true` in config it also seeds `skipDangerousModePermissionPrompt: true` into a fresh sandbox's `claude/settings.json`. |

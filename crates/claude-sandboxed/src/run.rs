@@ -219,8 +219,21 @@ pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, 
     }
 
     if cli.gpu || std::env::var("GPU").ok().as_deref() == Some("1") {
-        push!("--device");
-        push!("nvidia.com/gpu=all");
+        // Auto-detect vendor by probing host device nodes. AMD ROCm exposes
+        // `/dev/kfd`; otherwise fall back to the nvidia-container-toolkit CDI
+        // device. We don't try to support both at once — if a host has both
+        // an AMD and an NVIDIA GPU, AMD wins because that's what the probe
+        // sees first; users on such hosts can wire vendor-specific flags
+        // through `--env`/`--bind` themselves.
+        if std::path::Path::new("/dev/kfd").exists() {
+            push!("--device");
+            push!("/dev/kfd");
+            push!("--device");
+            push!("/dev/dri");
+        } else {
+            push!("--device");
+            push!("nvidia.com/gpu=all");
+        }
     }
 
     // Dev-env closure binds. Shell reads dev-closure-paths line-by-line; each
