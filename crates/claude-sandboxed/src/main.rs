@@ -8,6 +8,7 @@ mod firewall;
 mod globals;
 mod hookscan;
 mod images;
+mod notebook;
 mod paths;
 mod proxy_embedded;
 mod proxy_external;
@@ -134,6 +135,15 @@ fn run() -> Result<ExitCode, Error> {
         &cli.skill_file,
     )?;
 
+    // Validate the notebook file (workspace-relative, no escape) before any
+    // podman work, same as the profile/skill resolution above. `None` when
+    // not in --marimo mode.
+    let notebook_target = if cli.marimo {
+        Some(notebook::container_path(cli.notebook_file.as_deref())?)
+    } else {
+        None
+    };
+
     let seed = state::Seed {
         model: cfg.default_model,
         theme: cfg.default_theme,
@@ -173,19 +183,28 @@ fn run() -> Result<ExitCode, Error> {
         devenv::capture(&kind, &state)?;
     }
 
-    // Load the sandbox image (default or minimal, per --no-tools).
-    let (image_path, image_tag) = if cli.no_tools {
+    // Load the sandbox image. `--marimo` uses the dedicated notebook image
+    // (marimo + ACP sidecar); otherwise default or minimal per `--no-tools`
+    // (the two flags conflict in clap, so at most one is set).
+    let (image_path, image_tag, marker) = if cli.marimo {
+        (
+            paths::require("CLAUDE_SANDBOX_NOTEBOOK_IMAGE_PATH", paths::NOTEBOOK_IMAGE_PATH)?,
+            paths::NOTEBOOK_IMAGE_TAG,
+            "notebook-loaded",
+        )
+    } else if cli.no_tools {
         (
             paths::require("CLAUDE_SANDBOX_MINIMAL_IMAGE_PATH", paths::MINIMAL_IMAGE_PATH)?,
             paths::MINIMAL_IMAGE_TAG,
+            "minimal-loaded",
         )
     } else {
         (
             paths::require("CLAUDE_SANDBOX_IMAGE_PATH", paths::IMAGE_PATH)?,
             paths::SANDBOX_IMAGE_TAG,
+            "loaded",
         )
     };
-    let marker = if cli.no_tools { "minimal-loaded" } else { "loaded" };
     images::load_if_needed(image_path, marker)?;
 
     // Decide between embedded and external proxy.
@@ -228,8 +247,20 @@ fn run() -> Result<ExitCode, Error> {
     // each launch.
     write_stub_creds(&state.stub_creds(), &token)?;
 
-    // Firewall script.
-    firewall::write_script(&state.firewall_script(), carveout.as_deref())?;
+    // Firewall script. `--marimo` publishes ports to host loopback, so allow
+    // replies on those established connections (see firewall::write_script).
+    firewall::write_script(&state.firewall_script(), cli.marimo, carveout.as_deref())?;
+
+    // Notebook entrypoint script (only consumed by the container in --marimo
+    // mode, where run.rs bind-mounts it). Path was validated up front.
+    if let Some(nb) = notebook_target.as_deref() {
+        notebook::write_script(
+            &state.notebook_script(),
+            nb,
+            constants::ACP_PORT,
+            constants::MARIMO_PORT,
+        )?;
+    }
 
     // Deterministic name — ctrl+z handling in `pty` pauses by name, and
     // `reap` uses the PID suffix to distinguish killed siblings from

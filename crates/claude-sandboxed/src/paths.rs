@@ -20,12 +20,14 @@ macro_rules! const_env {
 
 pub const IMAGE_PATH: &str = const_env!("CLAUDE_SANDBOX_IMAGE_PATH");
 pub const MINIMAL_IMAGE_PATH: &str = const_env!("CLAUDE_SANDBOX_MINIMAL_IMAGE_PATH");
+pub const NOTEBOOK_IMAGE_PATH: &str = const_env!("CLAUDE_SANDBOX_NOTEBOOK_IMAGE_PATH");
 pub const PROXY_IMAGE_PATH: &str = const_env!("CLAUDE_PROXY_IMAGE_PATH");
 pub const SECCOMP_PATH: &str = const_env!("CLAUDE_SANDBOX_SECCOMP_PATH");
 
 pub const AUTH_PROXY_PORT: u16 = 18080;
 pub const SANDBOX_IMAGE_TAG: &str = "claude-sandbox:latest";
 pub const MINIMAL_IMAGE_TAG: &str = "claude-sandbox-minimal:latest";
+pub const NOTEBOOK_IMAGE_TAG: &str = "claude-sandbox-notebook:latest";
 pub const PROXY_IMAGE_TAG: &str = "claude-auth-proxy:latest";
 
 /// Return `path`, or produce a readable error when it's empty.

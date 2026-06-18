@@ -22,9 +22,24 @@ use std::path::Path;
 /// accept and the LAN rejects — needed for external-proxy mode when the
 /// proxy lives on a Tailscale / RFC1918 address that would otherwise be
 /// caught by the reject rules.
-pub fn write_script(path: &Path, carveout: Option<&str>) -> Result<(), crate::Error> {
+///
+/// When `allow_established` is set, an `output ct state established,related
+/// accept` rule is inserted right after `oif lo accept`. Notebook mode
+/// (`--marimo`) publishes ports to host loopback; replies on those
+/// host-initiated connections travel to pasta's translated source address,
+/// which can fall in an nft-rejected range. This rule passes those replies
+/// without loosening egress — a NEW outbound SYN to a LAN IP is still
+/// `ct state NEW` and still hits the reject rules below.
+pub fn write_script(
+    path: &Path,
+    allow_established: bool,
+    carveout: Option<&str>,
+) -> Result<(), crate::Error> {
     let mut f = fs::File::create(path)?;
     f.write_all(SHEBANG_AND_HEAD.as_bytes())?;
+    if allow_established {
+        f.write_all(ESTABLISHED.as_bytes())?;
+    }
     if let Some(rule) = carveout {
         f.write_all(rule.as_bytes())?;
         f.write_all(b"\n")?;
@@ -45,6 +60,12 @@ set -e
 nft add table inet sandbox
 nft add chain inet sandbox output '{ type filter hook output priority 0; }'
 nft add rule inet sandbox output oif lo accept
+";
+
+/// Inserted directly after `oif lo accept` in `--marimo` mode so replies on
+/// host-loopback-forwarded connections survive the LAN reject rules.
+const ESTABLISHED: &str = "\
+nft add rule inet sandbox output ct state established,related accept
 ";
 
 /// Lines 559-566 of package.nix — LAN reject rules + final accept.
@@ -95,7 +116,7 @@ mod tests {
     #[test]
     fn script_has_lo_accept_before_rejects() {
         let f = NamedTempFile::new().unwrap();
-        write_script(f.path(), None).unwrap();
+        write_script(f.path(), false, None).unwrap();
         let s = fs::read_to_string(f.path()).unwrap();
         let lo = s.find("oif lo accept").unwrap();
         let reject = s.find("reject").unwrap();
@@ -106,7 +127,7 @@ mod tests {
     fn carveout_placed_between_lo_and_rejects() {
         let f = NamedTempFile::new().unwrap();
         let rule = "nft add rule inet sandbox output ip daddr 100.64.0.1 tcp dport 18080 accept";
-        write_script(f.path(), Some(rule)).unwrap();
+        write_script(f.path(), false, Some(rule)).unwrap();
         let s = fs::read_to_string(f.path()).unwrap();
         let lo = s.find("oif lo accept").unwrap();
         let carve = s.find("100.64.0.1 tcp dport 18080 accept").unwrap();
@@ -115,9 +136,28 @@ mod tests {
     }
 
     #[test]
+    fn established_rule_absent_by_default() {
+        let f = NamedTempFile::new().unwrap();
+        write_script(f.path(), false, None).unwrap();
+        let s = fs::read_to_string(f.path()).unwrap();
+        assert!(!s.contains("ct state established,related accept"));
+    }
+
+    #[test]
+    fn established_rule_placed_between_lo_and_rejects() {
+        let f = NamedTempFile::new().unwrap();
+        write_script(f.path(), true, None).unwrap();
+        let s = fs::read_to_string(f.path()).unwrap();
+        let lo = s.find("oif lo accept").unwrap();
+        let est = s.find("ct state established,related accept").unwrap();
+        let reject = s.find("reject").unwrap();
+        assert!(lo < est && est < reject);
+    }
+
+    #[test]
     fn script_is_executable() {
         let f = NamedTempFile::new().unwrap();
-        write_script(f.path(), None).unwrap();
+        write_script(f.path(), false, None).unwrap();
         let mode = fs::metadata(f.path()).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o755);
     }

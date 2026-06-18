@@ -59,10 +59,11 @@ rustPlatform.buildRustPackage {
   # `crates/claude-sandboxed/src/paths.rs`. These must be set *before*
   # `cargo build` runs; buildRustPackage honors `env = { … };`.
   env = {
-    CLAUDE_SANDBOX_IMAGE_PATH         = container.image;
-    CLAUDE_SANDBOX_MINIMAL_IMAGE_PATH = container.minimalImage;
-    CLAUDE_PROXY_IMAGE_PATH           = container.proxyImage;
-    CLAUDE_SANDBOX_SECCOMP_PATH       = container.seccompProfile;
+    CLAUDE_SANDBOX_IMAGE_PATH          = container.image;
+    CLAUDE_SANDBOX_MINIMAL_IMAGE_PATH  = container.minimalImage;
+    CLAUDE_SANDBOX_NOTEBOOK_IMAGE_PATH = container.notebookImage;
+    CLAUDE_PROXY_IMAGE_PATH            = container.proxyImage;
+    CLAUDE_SANDBOX_SECCOMP_PATH        = container.seccompProfile;
   };
 
   # Expose the container set so `package.nix` can attach test harnesses

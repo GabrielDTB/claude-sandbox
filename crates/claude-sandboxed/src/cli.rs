@@ -79,6 +79,23 @@ pub struct Cli {
     #[arg(long = "no-tools")]
     pub no_tools: bool,
 
+    /// Launch a Marimo notebook + Claude Code ACP sidecar instead of the
+    /// Claude TUI.
+    ///
+    /// Uses the dedicated notebook image and runs `marimo edit` on a file in
+    /// the workspace (default `notebook.py`, override with `--notebook-file`).
+    /// The notebook UI and the ACP WebSocket are published to host loopback so
+    /// you connect from a browser outside the sandbox.
+    #[arg(long = "marimo", conflicts_with = "no_tools")]
+    pub marimo: bool,
+
+    /// Notebook file for `--marimo`, relative to the workspace (`/workspace`).
+    ///
+    /// Defaults to `notebook.py`. Absolute paths and `..` components are
+    /// rejected. Ignored without `--marimo`.
+    #[arg(long = "notebook-file", value_name = "PATH", requires = "marimo")]
+    pub notebook_file: Option<PathBuf>,
+
     /// Pass --dangerously-skip-permissions to claude
     #[arg(long)]
     pub permissive: bool,

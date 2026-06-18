@@ -53,6 +53,17 @@ pub const SANDBOX_CONTAINER_PREFIX: &str = "claude-sandbox-";
 /// siblings.
 pub const AUTH_PROXY_CONTAINER_PREFIX: &str = "claude-auth-proxy-";
 
+/// In-container port the Marimo notebook server listens on under `--marimo`.
+/// Published to host loopback (`127.0.0.1:<port>:<port>`) so the user opens
+/// the notebook from a host browser. Marimo's own default edit port.
+pub const MARIMO_PORT: u16 = 2718;
+
+/// In-container port the `stdio-to-ws` ACP bridge listens on under `--marimo`.
+/// Published to host loopback so Marimo's browser-side agent panel connects to
+/// `ws://localhost:<port>`. Must match the port Marimo's frontend uses for the
+/// Claude Code agent.
+pub const ACP_PORT: u16 = 3017;
+
 #[cfg(test)]
 mod tests {
     use super::*;

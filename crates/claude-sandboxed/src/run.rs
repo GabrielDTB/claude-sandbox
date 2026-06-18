@@ -9,7 +9,7 @@ use std::io::IsTerminal;
 use std::process::ExitCode;
 
 use crate::cli::Cli;
-use crate::constants::{PUBLIC_DNS, SANDBOX_PIDS_LIMIT_DEFAULT};
+use crate::constants::{ACP_PORT, MARIMO_PORT, PUBLIC_DNS, SANDBOX_PIDS_LIMIT_DEFAULT};
 use crate::globals::Selected;
 use crate::paths;
 use crate::pty;
@@ -260,22 +260,47 @@ pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, 
         }
     }
 
+    // Marimo notebook mode: publish the notebook UI + ACP WebSocket ports to
+    // host loopback so the user connects from a browser outside the sandbox,
+    // and bind-mount the generated entrypoint script. podman honors `-p` even
+    // with the custom pasta `--network` string, so the proxy network plumbing
+    // is untouched.
+    if cli.marimo {
+        push!("-p");
+        args.push(OsString::from(format!("127.0.0.1:{MARIMO_PORT}:{MARIMO_PORT}")));
+        push!("-p");
+        args.push(OsString::from(format!("127.0.0.1:{ACP_PORT}:{ACP_PORT}")));
+        push!("-v");
+        args.push(OsString::from(format!(
+            "{}:/notebook-entrypoint.sh:ro",
+            state.notebook_script().display()
+        )));
+    }
+
     // Image tag terminates the `podman run` flags.
     args.push(OsString::from(inputs.image_tag));
 
-    // Container-side command: /bin/bash /setup-firewall.sh [/dev-entrypoint.sh] /bin/claude …
+    // Container-side command: /bin/bash /setup-firewall.sh [/dev-entrypoint.sh] <target>.
+    // The target is the Claude TUI by default, or the notebook entrypoint under
+    // `--marimo`. Both compose with the dev-entrypoint wrapper (which exec's
+    // its args after sourcing the dev shell).
     push!("/bin/bash");
     push!("/setup-firewall.sh");
     if inputs.dev_env {
         push!("/bin/bash");
         push!("/dev-entrypoint.sh");
     }
-    push!("/bin/claude");
-    if cli.permissive {
-        push!("--dangerously-skip-permissions");
-    }
-    for a in &cli.passthrough {
-        args.push(OsString::from(a.clone()));
+    if cli.marimo {
+        push!("/bin/bash");
+        push!("/notebook-entrypoint.sh");
+    } else {
+        push!("/bin/claude");
+        if cli.permissive {
+            push!("--dangerously-skip-permissions");
+        }
+        for a in &cli.passthrough {
+            args.push(OsString::from(a.clone()));
+        }
     }
 
     // Hand off to the pty interposer. It owns stdio end-to-end (opens a

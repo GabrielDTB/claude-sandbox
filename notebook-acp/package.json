@@ -1,0 +1,10 @@
+{
+  "name": "claude-sandbox-notebook-acp",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Vendored npm closure for claude-sandboxed --marimo mode: the Claude Code ACP adapter plus the stdio-to-websocket bridge marimo connects to.",
+  "dependencies": {
+    "@zed-industries/claude-code-acp": "0.16.2",
+    "stdio-to-ws": "0.2.0"
+  }
+}

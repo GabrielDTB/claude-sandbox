@@ -82,6 +82,9 @@ impl State {
     pub fn dev_entrypoint_sh(&self) -> PathBuf {
         self.sandbox_dir.join("dev-entrypoint.sh")
     }
+    pub fn notebook_script(&self) -> PathBuf {
+        self.sandbox_dir.join("notebook-entrypoint.sh")
+    }
 }
 
 pub fn prepare(

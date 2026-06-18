@@ -3,10 +3,13 @@
   lib,
   dockerTools,
   buildEnv,
+  buildNpmPackage,
   writeText,
   writeTextDir,
   runCommand,
   claude-code,
+  uv,
+  nodejs,
   coreutils,
   bash,
   git,
@@ -135,9 +138,47 @@ let
 
   allPackages = corePackages ++ toolPackages ++ extraPackages;
 
+  # npm closure for `--marimo` mode: the Claude Code ACP adapter plus the
+  # stdio→websocket bridge marimo's agent panel connects to. Vendored as a
+  # tiny dependency-only package (notebook-acp/) so the build is hermetic —
+  # no `npx`/registry fetch at sandbox launch. postInstall surfaces the two
+  # dependency CLIs on $out/bin; their `#!/usr/bin/env node` shebangs resolve
+  # against the `nodejs` we add to the notebook image below.
+  acpSidecar = buildNpmPackage {
+    pname = "claude-sandbox-notebook-acp";
+    version = "0.0.0";
+    src = ./notebook-acp;
+    npmDepsHash = "sha256-Z6nHxCsmiyjXrBu3PaXtPvePnk3xMndykz0Unhyhxws=";
+    dontNpmBuild = true;
+    postInstall = ''
+      mkdir -p $out/bin
+      pkgdir=$out/lib/node_modules/claude-sandbox-notebook-acp
+      for b in claude-code-acp stdio-to-ws; do
+        ln -s "$pkgdir/node_modules/.bin/$b" "$out/bin/$b"
+      done
+    '';
+  };
+
+  # marimo (and its closure) on an interpreter the notebook venv can borrow via
+  # `uv venv --system-site-packages`. The entrypoint builds a writable venv at
+  # /workspace/.venv from this interpreter and runs marimo as it, so `uv pip
+  # install` from a notebook lands in the venv (the nix-store python is
+  # read-only / externally managed). Its path is surfaced to the entrypoint as
+  # NOTEBOOK_PYTHON via the notebook image's env.
+  notebookPython = python3.withPackages (ps: [ ps.marimo ]);
+
+  # Extra packages layered on top of the default toolset for notebook mode.
+  # `uv` is marimo's default in-editor package manager (set via the marimo.toml
+  # the notebook entrypoint seeds) and builds the per-sandbox venv.
+  notebookPackages = [
+    notebookPython
+    uv
+    nodejs
+    acpSidecar
+  ];
 
   mkContainerImage =
-    { name, packages, entrypoint ? null }:
+    { name, packages, entrypoint ? null, extraEnv ? [ ] }:
     let
       env = buildEnv {
         name = "${name}-env";
@@ -215,7 +256,8 @@ let
           "DISABLE_UPGRADE_COMMAND=1"
           "DISABLE_LOGIN_COMMAND=1"
           "DISABLE_LOGOUT_COMMAND=1"
-        ];
+        ]
+        ++ extraEnv;
         WorkingDir = "/workspace";
       }
       // lib.optionalAttrs (entrypoint != null) {
@@ -295,11 +337,21 @@ let
     name = "claude-sandbox-minimal";
     packages = corePackages;
   };
+
+  # Notebook image: the full default toolset plus marimo + the ACP sidecar.
+  # Selected by the launcher under `--marimo`.
+  notebookImage = mkContainerImage {
+    name = "claude-sandbox-notebook";
+    packages = allPackages ++ notebookPackages;
+    entrypoint = entrypointScript;
+    extraEnv = [ "NOTEBOOK_PYTHON=${notebookPython}/bin/python3" ];
+  };
 in
 {
   inherit
     image
     minimalImage
+    notebookImage
     proxyImage
     seccompProfile
     allPackages

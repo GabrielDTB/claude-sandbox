@@ -172,6 +172,8 @@ claude-sandboxed <workspace> [options] [-- claude-args...]
 | `--gpu` | `GPU=1` | Pass GPUs through. Auto-detects vendor: AMD (`/dev/kfd` + `/dev/dri`) if `/dev/kfd` exists on the host, otherwise NVIDIA via `nvidia-container-toolkit` (`nvidia.com/gpu=all`). |
 | `--anonymous` | — | Suppress identity-leaking config (GH token). |
 | `--no-tools` | — | Use the minimal container image (core packages only, no dev tools). |
+| `--marimo` | — | Launch a [Marimo notebook](#marimo-notebook-mode) + Claude Code ACP sidecar instead of the Claude TUI. Uses the dedicated notebook image; conflicts with `--no-tools`. |
+| `--notebook-file PATH` | — | Notebook file for `--marimo`, relative to `/workspace` (default `notebook.py`). Absolute paths and `..` are rejected. |
 | `--permissive` | — | Pass `--dangerously-skip-permissions` to `claude` inside. Combined with `permissive = true` in config it also seeds `skipDangerousModePermissionPrompt: true` into a fresh sandbox's `claude/settings.json`. |
 | `--auth-proxy URL` | `CLAUDE_SANDBOX_AUTH_PROXY` | Use an external proxy at `URL` instead of spawning an embedded one. Requires `--auth-token-file`. |
 | `--auth-token-file PATH` | `CLAUDE_SANDBOX_AUTH_TOKEN_FILE` | File containing the sandbox bearer token for the external proxy. |
@@ -199,6 +201,36 @@ claude-sandboxed --print-default-config > ~/.config/claude-sandboxed/config.toml
 ```
 
 Short-circuits before any filesystem or podman work, so it runs fine in environments without `$HOME` or `podman`.
+
+### Marimo notebook mode
+
+`--marimo` swaps the Claude TUI for a [Marimo](https://marimo.io) notebook server plus a
+[`@zed-industries/claude-code-acp`](https://github.com/zed-industries/claude-code-acp) sidecar,
+both running **inside** the sandbox. Marimo's agent panel drives Claude Code over ACP, while you
+edit the notebook from a browser **outside** the sandbox.
+
+```sh
+claude-sandboxed ~/proj --marimo                       # edits /workspace/notebook.py
+claude-sandboxed ~/proj --marimo --notebook-file nb.py # edits /workspace/nb.py
+```
+
+- Uses the dedicated **notebook image** (Claude tools + `marimo` + `uv` + the ACP sidecar); conflicts
+  with `--no-tools`. On launch the sandbox seeds `~/.config/marimo/marimo.toml` (unless one already
+  exists) with `experimental.external_agents = true` (enables the agent panel out of the box) and
+  `package_management.manager = "uv"` (uv instead of pip).
+- On first launch the sandbox builds one writable virtualenv per sandbox at `/workspace/.venv`
+  (`uv venv --system-site-packages` off the bundled marimo interpreter) and runs both marimo and the
+  ACP sidecar inside it. The nix-store interpreter is read-only, so this is what makes `uv pip install`
+  from a notebook cell work — installed packages land in the venv and are importable by the kernel. The
+  venv is reused on relaunch; delete `/workspace/.venv` to rebuild it.
+- Two ports are published to **host loopback only**: the notebook UI on `127.0.0.1:2718` and the ACP
+  WebSocket on `127.0.0.1:3017`. Open the tokenized `http://localhost:2718` URL that Marimo prints in
+  the terminal.
+- Open the **agent panel** (agents icon in the sidebar) and select **Claude Code** from the dropdown.
+  Marimo's frontend connects directly to `ws://localhost:3017`, which the forwarded port routes to the
+  in-sandbox `claude-code-acp` bridge — no command to run and no URL to enter. The sidecar's Claude
+  requests flow through the same auth proxy as the normal TUI, so no extra credentials are needed.
+- Because the ports are fixed, only one `--marimo` sandbox can run at a time per host.
 
 ---
 
@@ -548,6 +580,7 @@ crates/
 │       ├── proxy_external.rs          # URL parse + DNS + firewall carveout
 │       ├── run.rs                     # builds and runs `podman run`
 │       ├── firewall.rs                # nftables + capability-drop script
+│       ├── notebook.rs                # --marimo entrypoint script (marimo + ACP sidecar)
 │       ├── pty.rs                     # PTY interposer; ^Z handling, termios restore
 │       ├── devenv.rs                  # --flake / --devenv capture
 │       ├── globals.rs                 # inherited skills/memory selection + per-file mounts
