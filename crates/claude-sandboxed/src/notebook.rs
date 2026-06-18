@@ -84,10 +84,34 @@ pub fn write_script(
          # read-only / externally-managed, so `uv pip install` from a notebook\n\
          # cell would fail against it. --system-site-packages lets the venv\n\
          # borrow marimo (and its closure) from that interpreter while keeping\n\
-         # installs writable into the venv. Built once; reused on relaunch.\n\
+         # installs writable into the venv.\n\
+         #\n\
+         # The venv is rebuilt from scratch whenever the workspace pyproject.toml\n\
+         # changes (sha256 stamped in the venv), so removing a dependency takes\n\
+         # effect -- an additive `uv pip install` never uninstalls. Because\n\
+         # marimo is borrowed rather than installed here, a rebuild only\n\
+         # re-fetches the project's own deps, which uv caches, so it stays cheap.\n\
+         # An unchanged manifest reuses the existing venv untouched.\n\
          VENV=/workspace/.venv\n\
-         if [ ! -x \"$VENV/bin/python\" ]; then\n\
+         PYPROJECT=/workspace/pyproject.toml\n\
+         STAMP=\"$VENV/.pyproject.sha256\"\n\
+         WANT=\n\
+         if [ -f \"$PYPROJECT\" ]; then WANT=$(sha256sum \"$PYPROJECT\" | cut -d' ' -f1); fi\n\
+         HAVE=\n\
+         if [ -f \"$STAMP\" ]; then HAVE=$(cat \"$STAMP\" 2>/dev/null); fi\n\
+         if [ ! -x \"$VENV/bin/python\" ] || [ \"$HAVE\" != \"$WANT\" ]; then\n\
+         rm -rf \"$VENV\"\n\
          uv venv --system-site-packages --python \"$NOTEBOOK_PYTHON\" \"$VENV\"\n\
+         SYNCED=1\n\
+         if [ -f \"$PYPROJECT\" ]; then\n\
+         echo 'claude-sandboxed: syncing workspace dependencies from pyproject.toml' >&2\n\
+         if ! uv pip install --python \"$VENV/bin/python\" -r \"$PYPROJECT\"; then\n\
+         SYNCED=0\n\
+         echo 'claude-sandboxed: pyproject sync failed; continuing without it' >&2\n\
+         fi\n\
+         fi\n\
+         # Stamp only on success so a transient failure retries on next launch.\n\
+         if [ \"$SYNCED\" = 1 ]; then echo \"$WANT\" > \"$STAMP\"; fi\n\
          fi\n\
          # Activate the venv for everything launched below: marimo's kernel AND\n\
          # the claude sidecar, so a package installed from a cell is importable\n\
@@ -174,16 +198,25 @@ mod tests {
         assert!(s.contains("export VIRTUAL_ENV=\"$VENV\""));
         assert!(s.contains("export PATH=\"$VENV/bin:$PATH\""));
         assert!(s.contains("exec \"$VENV/bin/python\" -m marimo edit"));
+        // syncs workspace pyproject deps into the venv, change-gated by a hash
+        assert!(s.contains("PYPROJECT=/workspace/pyproject.toml"));
+        assert!(s.contains("uv pip install --python \"$VENV/bin/python\" -r \"$PYPROJECT\""));
+        assert!(s.contains("$VENV/.pyproject.sha256"));
+        // manifest change rebuilds the venv from scratch so removals take effect
+        assert!(s.contains("rm -rf \"$VENV\""));
+        assert!(s.contains("[ \"$HAVE\" != \"$WANT\" ]"));
         // seeds marimo config: external-agents panel + uv package manager
         assert!(s.contains("[experimental]"));
         assert!(s.contains("external_agents = true"));
         assert!(s.contains("[package_management]"));
         assert!(s.contains("manager = \"uv\""));
-        // venv created before sidecar; sidecar backgrounded before marimo exec.
+        // venv created, then pyproject synced, then sidecar, then marimo exec.
         let venv = s.find("uv venv").unwrap();
+        let sync = s.find("uv pip install --python").unwrap();
         let acp = s.find("stdio-to-ws").unwrap();
         let marimo = s.find("-m marimo edit").unwrap();
-        assert!(venv < acp);
+        assert!(venv < sync);
+        assert!(sync < acp);
         assert!(acp < marimo);
         let mode = fs::metadata(f.path()).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o755);

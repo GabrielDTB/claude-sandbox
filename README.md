@@ -223,6 +223,14 @@ claude-sandboxed ~/proj --marimo --notebook-file nb.py # edits /workspace/nb.py
   ACP sidecar inside it. The nix-store interpreter is read-only, so this is what makes `uv pip install`
   from a notebook cell work — installed packages land in the venv and are importable by the kernel. The
   venv is reused on relaunch; delete `/workspace/.venv` to rebuild it.
+- If the workspace ships a `pyproject.toml`, its `[project].dependencies` are installed into the venv
+  (`uv pip install -r pyproject.toml`) at launch. The sync is change-gated by a hash of the manifest
+  (stamped in the venv): an unchanged manifest reuses the venv untouched, while any change **rebuilds
+  the venv from scratch** so that *removing* a dependency takes effect (a plain install never
+  uninstalls). Because marimo is borrowed via `--system-site-packages` rather than installed, a rebuild
+  only re-fetches your project's deps (cached by uv), so it stays fast — but note it also clears any
+  packages you installed ad-hoc from a notebook cell. Edit `pyproject.toml` and relaunch to apply
+  changes; a failed sync warns but still starts the notebook.
 - Two ports are published to **host loopback only**: the notebook UI on `127.0.0.1:2718` and the ACP
   WebSocket on `127.0.0.1:3017`. Open the tokenized `http://localhost:2718` URL that Marimo prints in
   the terminal.
