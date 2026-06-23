@@ -13,6 +13,13 @@
 //! creds already present in the container, so they flow through the auth proxy
 //! like the normal Claude TUI.
 //!
+//! The Python environment is provisioned by `pixi`: the entrypoint declares a
+//! `[tool.pixi]` environment in the workspace `pyproject.toml` (seeding it, and
+//! `marimo` from PyPI, if absent), creates the per-sandbox env at
+//! `/workspace/.pixi`, and runs marimo inside it so an in-cell `pixi add`
+//! reaches the live kernel. Pixi's lockfile reconciles dependency adds/removals,
+//! so there is no manual change-gating here.
+//!
 //! The firewall script still execs this script as its final argument (after
 //! dropping caps), so the cap-drop / nftables isolation is identical to the
 //! Claude TUI path.
@@ -79,65 +86,49 @@ pub fn write_script(
     let script = format!(
         "#!/bin/bash\n\
          set -e\n\
-         # One writable venv per sandbox at /workspace/.venv. The nix-store\n\
-         # interpreter ($NOTEBOOK_PYTHON, set in the notebook image's env) is\n\
-         # read-only / externally-managed, so `uv pip install` from a notebook\n\
-         # cell would fail against it. --system-site-packages lets the venv\n\
-         # borrow marimo (and its closure) from that interpreter while keeping\n\
-         # installs writable into the venv.\n\
-         #\n\
-         # The venv is rebuilt from scratch whenever the workspace pyproject.toml\n\
-         # changes (sha256 stamped in the venv), so removing a dependency takes\n\
-         # effect -- an additive `uv pip install` never uninstalls. Because\n\
-         # marimo is borrowed rather than installed here, a rebuild only\n\
-         # re-fetches the project's own deps, which uv caches, so it stays cheap.\n\
-         # An unchanged manifest reuses the existing venv untouched.\n\
-         VENV=/workspace/.venv\n\
-         PYPROJECT=/workspace/pyproject.toml\n\
-         STAMP=\"$VENV/.pyproject.sha256\"\n\
-         WANT=\n\
-         if [ -f \"$PYPROJECT\" ]; then WANT=$(sha256sum \"$PYPROJECT\" | cut -d' ' -f1); fi\n\
-         HAVE=\n\
-         if [ -f \"$STAMP\" ]; then HAVE=$(cat \"$STAMP\" 2>/dev/null); fi\n\
-         if [ ! -x \"$VENV/bin/python\" ] || [ \"$HAVE\" != \"$WANT\" ]; then\n\
-         rm -rf \"$VENV\"\n\
-         uv venv --system-site-packages --python \"$NOTEBOOK_PYTHON\" \"$VENV\"\n\
-         SYNCED=1\n\
-         if [ -f \"$PYPROJECT\" ]; then\n\
-         echo 'claude-sandboxed: syncing workspace dependencies from pyproject.toml' >&2\n\
-         if ! uv pip install --python \"$VENV/bin/python\" -r \"$PYPROJECT\"; then\n\
-         SYNCED=0\n\
-         echo 'claude-sandboxed: pyproject sync failed; continuing without it' >&2\n\
+         cd /workspace\n\
+         # One pixi environment per sandbox at /workspace/.pixi, declared in the\n\
+         # workspace pyproject.toml's [tool.pixi] tables. `pixi init` augments an\n\
+         # existing pyproject (or creates one); any PEP 621 [project.dependencies]\n\
+         # already present are picked up by pixi as PyPI deps. marimo runs INSIDE\n\
+         # this env (not borrowed from a read-only nix interpreter as the old uv\n\
+         # path did), so an in-cell `pixi add` reaches the live kernel.\n\
+         if ! grep -q '\\[tool\\.pixi' pyproject.toml 2>/dev/null; then\n\
+         pixi init --format pyproject .\n\
          fi\n\
-         fi\n\
-         # Stamp only on success so a transient failure retries on next launch.\n\
-         if [ \"$SYNCED\" = 1 ]; then echo \"$WANT\" > \"$STAMP\"; fi\n\
-         fi\n\
-         # Activate the venv for everything launched below: marimo's kernel AND\n\
+         # Base interpreter (conda) + marimo (PyPI). Idempotent: each `pixi add`\n\
+         # is skipped when the dep is already declared, so a committed manifest\n\
+         # is left untouched.\n\
+         grep -q '^python' pyproject.toml || pixi add python\n\
+         grep -q 'marimo' pyproject.toml || pixi add --pypi marimo\n\
+         # Solve + materialize the env. Pixi's lockfile reconciles adds/removals,\n\
+         # so removing a dependency takes effect without any manual rebuild.\n\
+         echo 'claude-sandboxed: provisioning pixi environment' >&2\n\
+         pixi install\n\
+         # Activate the env for everything launched below: marimo's kernel AND\n\
          # the claude sidecar, so a package installed from a cell is importable\n\
-         # by both. Exported before the sidecar starts so it inherits them.\n\
-         export VIRTUAL_ENV=\"$VENV\"\n\
-         export PATH=\"$VENV/bin:$PATH\"\n\
+         # by both. Sourced before the sidecar starts so it inherits the env.\n\
+         eval \"$(pixi shell-hook)\"\n\
          # Seed marimo config (skip if one was already provided):\n\
          #   * experimental.external_agents = true  -> the ACP agent panel is\n\
          #     enabled out of the box (no manual Lab toggle); marimo's frontend\n\
          #     then connects to the claude-code-acp bridge at ws://localhost:{acp_port}.\n\
-         #   * package_management.manager = uv  -> uv (on PATH) instead of pip,\n\
-         #     which the bare interpreter doesn't ship.\n\
+         #   * package_management.manager = pixi  -> in-cell installs go through\n\
+         #     pixi (which owns the active env) instead of pip.\n\
          if [ ! -f \"$HOME/.config/marimo/marimo.toml\" ]; then\n\
          mkdir -p \"$HOME/.config/marimo\"\n\
-         printf '[experimental]\\nexternal_agents = true\\n\\n[package_management]\\nmanager = \"uv\"\\n' > \"$HOME/.config/marimo/marimo.toml\"\n\
+         printf '[experimental]\\nexternal_agents = true\\n\\n[package_management]\\nmanager = \"pixi\"\\n' > \"$HOME/.config/marimo/marimo.toml\"\n\
          fi\n\
          # ACP sidecar: bridge claude-code-acp's stdio onto a WebSocket the\n\
          # browser-side marimo agent panel connects to.\n\
          stdio-to-ws \"claude-code-acp\" --port {acp_port} &\n\
-         # Notebook server in the foreground (owns the PTY), run as the venv\n\
-         # python so its kernel installs/imports land in the venv. --host\n\
-         # 0.0.0.0 so the published loopback port reaches it; --proxy\n\
-         # localhost:{marimo_port} so the banner prints the host-reachable URL\n\
-         # (published on host loopback at this port) instead of the container's\n\
-         # 0.0.0.0 / LAN IPs; --headless to not open a browser in the container.\n\
-         exec \"$VENV/bin/python\" -m marimo edit '{notebook_path}' --host 0.0.0.0 --port {marimo_port} --proxy localhost:{marimo_port} --headless\n",
+         # Notebook server in the foreground (owns the PTY), run inside the pixi\n\
+         # env so its kernel installs/imports land there. --host 0.0.0.0 so the\n\
+         # published loopback port reaches it; --proxy localhost:{marimo_port} so\n\
+         # the banner prints the host-reachable URL (published on host loopback at\n\
+         # this port) instead of the container's 0.0.0.0 / LAN IPs; --headless to\n\
+         # not open a browser in the container.\n\
+         exec marimo edit '{notebook_path}' --host 0.0.0.0 --port {marimo_port} --proxy localhost:{marimo_port} --headless\n",
     );
 
     let mut f = fs::File::create(path)?;
@@ -189,34 +180,30 @@ mod tests {
         write_script(f.path(), "/workspace/notebook.py", 3017, 2718).unwrap();
         let s = fs::read_to_string(f.path()).unwrap();
         assert!(s.contains("stdio-to-ws \"claude-code-acp\" --port 3017"));
-        assert!(s.contains("-m marimo edit '/workspace/notebook.py'"));
+        assert!(s.contains("marimo edit '/workspace/notebook.py'"));
         assert!(s.contains("--port 2718"));
         assert!(s.contains("--proxy localhost:2718"));
-        // per-sandbox venv at /workspace/.venv, run marimo as the venv python
-        assert!(s.contains("VENV=/workspace/.venv"));
-        assert!(s.contains("uv venv --system-site-packages --python \"$NOTEBOOK_PYTHON\""));
-        assert!(s.contains("export VIRTUAL_ENV=\"$VENV\""));
-        assert!(s.contains("export PATH=\"$VENV/bin:$PATH\""));
-        assert!(s.contains("exec \"$VENV/bin/python\" -m marimo edit"));
-        // syncs workspace pyproject deps into the venv, change-gated by a hash
-        assert!(s.contains("PYPROJECT=/workspace/pyproject.toml"));
-        assert!(s.contains("uv pip install --python \"$VENV/bin/python\" -r \"$PYPROJECT\""));
-        assert!(s.contains("$VENV/.pyproject.sha256"));
-        // manifest change rebuilds the venv from scratch so removals take effect
-        assert!(s.contains("rm -rf \"$VENV\""));
-        assert!(s.contains("[ \"$HAVE\" != \"$WANT\" ]"));
-        // seeds marimo config: external-agents panel + uv package manager
+        // per-sandbox pixi env at /workspace/.pixi, marimo run inside it
+        assert!(s.contains("cd /workspace"));
+        assert!(s.contains("pixi init --format pyproject ."));
+        assert!(s.contains("pixi add --pypi marimo"));
+        assert!(s.contains("pixi install"));
+        assert!(s.contains("eval \"$(pixi shell-hook)\""));
+        assert!(s.contains("exec marimo edit"));
+        // environment is declared in the workspace pyproject.toml's [tool.pixi]
+        assert!(s.contains("grep -q '\\[tool\\.pixi' pyproject.toml"));
+        // seeds marimo config: external-agents panel + pixi package manager
         assert!(s.contains("[experimental]"));
         assert!(s.contains("external_agents = true"));
         assert!(s.contains("[package_management]"));
-        assert!(s.contains("manager = \"uv\""));
-        // venv created, then pyproject synced, then sidecar, then marimo exec.
-        let venv = s.find("uv venv").unwrap();
-        let sync = s.find("uv pip install --python").unwrap();
+        assert!(s.contains("manager = \"pixi\""));
+        // env provisioned + activated, then sidecar, then marimo exec.
+        let install = s.find("pixi install").unwrap();
+        let activate = s.find("pixi shell-hook").unwrap();
         let acp = s.find("stdio-to-ws").unwrap();
-        let marimo = s.find("-m marimo edit").unwrap();
-        assert!(venv < sync);
-        assert!(sync < acp);
+        let marimo = s.find("exec marimo edit").unwrap();
+        assert!(install < activate);
+        assert!(activate < acp);
         assert!(acp < marimo);
         let mode = fs::metadata(f.path()).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o755);

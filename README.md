@@ -214,23 +214,19 @@ claude-sandboxed ~/proj --marimo                       # edits /workspace/notebo
 claude-sandboxed ~/proj --marimo --notebook-file nb.py # edits /workspace/nb.py
 ```
 
-- Uses the dedicated **notebook image** (Claude tools + `marimo` + `uv` + the ACP sidecar); conflicts
+- Uses the dedicated **notebook image** (Claude tools + `pixi` + the ACP sidecar); conflicts
   with `--no-tools`. On launch the sandbox seeds `~/.config/marimo/marimo.toml` (unless one already
   exists) with `experimental.external_agents = true` (enables the agent panel out of the box) and
-  `package_management.manager = "uv"` (uv instead of pip).
-- On first launch the sandbox builds one writable virtualenv per sandbox at `/workspace/.venv`
-  (`uv venv --system-site-packages` off the bundled marimo interpreter) and runs both marimo and the
-  ACP sidecar inside it. The nix-store interpreter is read-only, so this is what makes `uv pip install`
-  from a notebook cell work — installed packages land in the venv and are importable by the kernel. The
-  venv is reused on relaunch; delete `/workspace/.venv` to rebuild it.
-- If the workspace ships a `pyproject.toml`, its `[project].dependencies` are installed into the venv
-  (`uv pip install -r pyproject.toml`) at launch. The sync is change-gated by a hash of the manifest
-  (stamped in the venv): an unchanged manifest reuses the venv untouched, while any change **rebuilds
-  the venv from scratch** so that *removing* a dependency takes effect (a plain install never
-  uninstalls). Because marimo is borrowed via `--system-site-packages` rather than installed, a rebuild
-  only re-fetches your project's deps (cached by uv), so it stays fast — but note it also clears any
-  packages you installed ad-hoc from a notebook cell. Edit `pyproject.toml` and relaunch to apply
-  changes; a failed sync warns but still starts the notebook.
+  `package_management.manager = "pixi"` (in-cell installs go through pixi instead of pip).
+- The Python environment is provisioned by [pixi](https://pixi.sh) into one per-sandbox env at
+  `/workspace/.pixi`, and both marimo and the ACP sidecar run inside it — so a package installed from a
+  notebook cell (`pixi add`) is importable by the kernel. Delete `/workspace/.pixi` to rebuild it.
+- The environment is declared in the workspace `pyproject.toml`'s `[tool.pixi]` tables. If the workspace
+  has no pixi tables yet, the sandbox seeds them on launch (`pixi init`) and adds `marimo` from **PyPI**;
+  any PEP 621 `[project.dependencies]` already present are picked up by pixi as PyPI deps. On each launch
+  `pixi install` reconciles the env against the manifest — unlike the old uv flow, *removing* a dependency
+  takes effect without a full rebuild, courtesy of pixi's lockfile (`pixi.lock`). Edit `pyproject.toml`
+  (or `pixi add` from a cell) and the change is reflected on the next `pixi install`.
 - Two ports are published to **host loopback only**: the notebook UI on `127.0.0.1:2718` and the ACP
   WebSocket on `127.0.0.1:3017`. Open the tokenized `http://localhost:2718` URL that Marimo prints in
   the terminal.

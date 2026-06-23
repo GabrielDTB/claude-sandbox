@@ -8,7 +8,7 @@
   writeTextDir,
   runCommand,
   claude-code,
-  uv,
+  pixi,
   nodejs,
   coreutils,
   bash,
@@ -159,20 +159,14 @@ let
     '';
   };
 
-  # marimo (and its closure) on an interpreter the notebook venv can borrow via
-  # `uv venv --system-site-packages`. The entrypoint builds a writable venv at
-  # /workspace/.venv from this interpreter and runs marimo as it, so `uv pip
-  # install` from a notebook lands in the venv (the nix-store python is
-  # read-only / externally managed). Its path is surfaced to the entrypoint as
-  # NOTEBOOK_PYTHON via the notebook image's env.
-  notebookPython = python3.withPackages (ps: [ ps.marimo ]);
-
   # Extra packages layered on top of the default toolset for notebook mode.
-  # `uv` is marimo's default in-editor package manager (set via the marimo.toml
-  # the notebook entrypoint seeds) and builds the per-sandbox venv.
+  # `pixi` provisions the per-sandbox environment (declared in the workspace
+  # pyproject.toml's [tool.pixi] tables) and is marimo's in-editor package
+  # manager (set via the marimo.toml the notebook entrypoint seeds). marimo
+  # itself is installed from PyPI by pixi into that env rather than baked into
+  # a nix interpreter, so an in-cell `pixi add` reaches the live kernel.
   notebookPackages = [
-    notebookPython
-    uv
+    pixi
     nodejs
     acpSidecar
   ];
@@ -344,7 +338,6 @@ let
     name = "claude-sandbox-notebook";
     packages = allPackages ++ notebookPackages;
     entrypoint = entrypointScript;
-    extraEnv = [ "NOTEBOOK_PYTHON=${notebookPython}/bin/python3" ];
   };
 in
 {
