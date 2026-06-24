@@ -8,7 +8,7 @@ pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 
 pub const AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
-pub const OAUTH_REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";
+pub const OAUTH_REDIRECT_URI: &str = "https://platform.claude.com/oauth/code/callback";
 pub const OAUTH_SCOPES: &str = "org:create_api_key user:profile user:inference";
 
 pub const ALLOWED_PREFIXES: &[&str] = &["/v1/", "/api/oauth/claude_cli/"];
