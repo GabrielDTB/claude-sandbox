@@ -9,7 +9,8 @@ pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 
 pub const AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
 pub const OAUTH_REDIRECT_URI: &str = "https://platform.claude.com/oauth/code/callback";
-pub const OAUTH_SCOPES: &str = "org:create_api_key user:profile user:inference";
+pub const OAUTH_SCOPES: &str =
+    "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 
 pub const ALLOWED_PREFIXES: &[&str] = &["/v1/", "/api/oauth/claude_cli/"];
 
