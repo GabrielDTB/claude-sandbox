@@ -20,6 +20,12 @@
 //! reaches the live kernel. Pixi's lockfile reconciles dependency adds/removals,
 //! so there is no manual change-gating here.
 //!
+//! A `pixi` shim is placed on the kernel's PATH to work around rattler pinning
+//! directory mtimes to 1980: CPython's `FileFinder` only re-scans a directory
+//! whose mtime changed, so without the shim (which touches the env's
+//! site-packages after each pixi call) an in-cell install stays invisible to
+//! the running kernel until restart.
+//!
 //! The firewall script still execs this script as its final argument (after
 //! dropping caps), so the cap-drop / nftables isolation is identical to the
 //! Claude TUI path.
@@ -108,7 +114,29 @@ pub fn write_script(
          # Activate the env for everything launched below: marimo's kernel AND\n\
          # the claude sidecar, so a package installed from a cell is importable\n\
          # by both. Sourced before the sidecar starts so it inherits the env.\n\
+         # Resolve the real pixi binary first: the shell-hook defines a `pixi`\n\
+         # shell function, after which `command -v pixi` no longer returns a path.\n\
+         pixi_real=\"$(command -v pixi)\"\n\
          eval \"$(pixi shell-hook)\"\n\
+         # Shim pixi for marimo's kernel: rattler pins directory mtimes to\n\
+         # 1980-01-01, and CPython's FileFinder only re-lists a directory when\n\
+         # its mtime CHANGES -- so a package installed by an in-cell `pixi add`\n\
+         # stays invisible to the live kernel until restart (pip avoids this by\n\
+         # bumping site-packages' mtime as a side effect of writing into it).\n\
+         # The shim bumps the env's site-packages mtimes after every pixi call,\n\
+         # so the kernel's next import attempt re-scans and finds the package.\n\
+         # Marimo spawns `pixi` via PATH lookup, which resolves to this shim.\n\
+         shim_dir=\"$HOME/.cache/claude-sandboxed/pixi-shim\"\n\
+         mkdir -p \"$shim_dir\"\n\
+         cat > \"$shim_dir/pixi\" <<PIXI_SHIM\n\
+         #!/bin/bash\n\
+         \"$pixi_real\" \"\\$@\"\n\
+         rc=\\$?\n\
+         touch /workspace/.pixi/envs/*/lib/python*/site-packages 2>/dev/null\n\
+         exit \\$rc\n\
+         PIXI_SHIM\n\
+         chmod +x \"$shim_dir/pixi\"\n\
+         export PATH=\"$shim_dir:$PATH\"\n\
          # Seed marimo config (skip if one was already provided):\n\
          #   * experimental.external_agents = true  -> the ACP agent panel is\n\
          #     enabled out of the box (no manual Lab toggle); marimo's frontend\n\
@@ -218,6 +246,18 @@ mod tests {
         assert!(s.contains("pixi install"));
         assert!(s.contains("eval \"$(pixi shell-hook)\""));
         assert!(s.contains("exec marimo edit"));
+        // pixi shim: real binary resolved BEFORE the shell-hook defines a
+        // `pixi` function, shim bumps site-packages mtimes (rattler pins them
+        // to 1980, defeating FileFinder's mtime-based re-scan), and PATH is
+        // prepended so marimo's kernel resolves the shim.
+        assert!(s.contains("pixi_real=\"$(command -v pixi)\""));
+        assert!(s.contains("touch /workspace/.pixi/envs/*/lib/python*/site-packages"));
+        assert!(s.contains("export PATH=\"$shim_dir:$PATH\""));
+        let resolve = s.find("pixi_real=").unwrap();
+        let hook = s.find("pixi shell-hook").unwrap();
+        let shim = s.find("shim_dir=").unwrap();
+        assert!(resolve < hook);
+        assert!(hook < shim);
         // environment is declared in the workspace pyproject.toml's [tool.pixi]
         assert!(s.contains("grep -q '\\[tool\\.pixi' pyproject.toml"));
         // seeds marimo config: external-agents panel + pixi package manager
