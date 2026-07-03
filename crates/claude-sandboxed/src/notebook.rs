@@ -20,6 +20,13 @@
 //! reaches the live kernel. Pixi's lockfile reconciles dependency adds/removals,
 //! so there is no manual change-gating here.
 //!
+//! Marimo's own AI features ("generate with AI", AI chat) are wired to the
+//! same auth proxy: the seeded config registers an OpenAI-compatible custom
+//! provider pointing at `$ANTHROPIC_BASE_URL/v1/` (Anthropic's OpenAI-compat
+//! endpoint, reachable through the proxy's `/v1/` allowlist) using the stub
+//! sandbox-to-proxy token as the api_key, since the openai client transmits it
+//! as the `Authorization: Bearer` header the proxy authenticates.
+//!
 //! A `pixi` shim is placed on the kernel's PATH to work around rattler pinning
 //! directory mtimes to 1980: CPython's `FileFinder` only re-scans a directory
 //! whose mtime changed, so without the shim (which touches the env's
@@ -107,6 +114,9 @@ pub fn write_script(
          # is left untouched.\n\
          grep -q '^python' pyproject.toml || pixi add python\n\
          grep -q 'marimo' pyproject.toml || pixi add --pypi marimo\n\
+         # openai: marimo drives OpenAI-compatible providers (our proxy, below)\n\
+         # through the openai client package.\n\
+         grep -q 'openai' pyproject.toml || pixi add --pypi openai\n\
          # Solve + materialize the env. Pixi's lockfile reconciles adds/removals,\n\
          # so removing a dependency takes effect without any manual rebuild.\n\
          echo 'claude-sandboxed: provisioning pixi environment' >&2\n\
@@ -143,9 +153,23 @@ pub fn write_script(
          #     then connects to the claude-code-acp bridge at ws://localhost:{acp_port}.\n\
          #   * package_management.manager = pixi  -> in-cell installs go through\n\
          #     pixi (which owns the active env) instead of pip.\n\
+         #   * ai.custom_providers.claude-proxy -> \"generate with AI\" / AI chat\n\
+         #     via the auth proxy: Anthropic's OpenAI-compat /v1/chat/completions\n\
+         #     lives under the proxy's allowed /v1/ prefix, and the openai client\n\
+         #     sends its api_key as `Authorization: Bearer ...`, which is exactly\n\
+         #     the sandbox-to-proxy token scheme -- so the stub accessToken from\n\
+         #     ~/.claude/.credentials.json doubles as the provider api_key. No\n\
+         #     autocomplete_model on purpose: inline completion fires per\n\
+         #     keystroke and would chew through subscription quota.\n\
          if [ ! -f \"$HOME/.config/marimo/marimo.toml\" ]; then\n\
          mkdir -p \"$HOME/.config/marimo\"\n\
          printf '[experimental]\\nexternal_agents = true\\n\\n[package_management]\\nmanager = \"pixi\"\\n' > \"$HOME/.config/marimo/marimo.toml\"\n\
+         proxy_token=\"$(python -c 'import json,os;print(json.load(open(os.path.expanduser(\"~/.claude/.credentials.json\")))[\"claudeAiOauth\"][\"accessToken\"])' 2>/dev/null || true)\"\n\
+         if [ -n \"$proxy_token\" ] && [ -n \"${{ANTHROPIC_BASE_URL-}}\" ]; then\n\
+         printf '\\n[ai.models]\\nchat_model = \"claude-proxy/claude-sonnet-4-6\"\\nedit_model = \"claude-proxy/claude-sonnet-4-6\"\\ncustom_models = [\"claude-proxy/claude-opus-4-8\", \"claude-proxy/claude-sonnet-4-6\", \"claude-proxy/claude-haiku-4-5-20251001\"]\\n\\n[ai.custom_providers.claude-proxy]\\napi_key = \"%s\"\\nbase_url = \"%s/v1/\"\\n' \"$proxy_token\" \"$ANTHROPIC_BASE_URL\" >> \"$HOME/.config/marimo/marimo.toml\"\n\
+         else\n\
+         echo 'claude-sandboxed: no proxy creds/base-url found; skipping marimo AI provider config' >&2\n\
+         fi\n\
          fi\n\
          # ACP sidecar: bridge claude-code-acp's stdio onto a WebSocket the\n\
          # browser-side marimo agent panel auto-connects to at\n\
@@ -265,6 +289,16 @@ mod tests {
         assert!(s.contains("external_agents = true"));
         assert!(s.contains("[package_management]"));
         assert!(s.contains("manager = \"pixi\""));
+        // AI provider through the auth proxy: openai package installed, custom
+        // provider seeded from the stub token + ANTHROPIC_BASE_URL (guarded so
+        // a missing token degrades to a working notebook without AI).
+        assert!(s.contains("pixi add --pypi openai"));
+        assert!(s.contains("[ai.custom_providers.claude-proxy]"));
+        assert!(s.contains("api_key = \"%s\""));
+        assert!(s.contains("base_url = \"%s/v1/\""));
+        assert!(s.contains("edit_model = \"claude-proxy/claude-sonnet-4-6\""));
+        assert!(s.contains("claudeAiOauth"));
+        assert!(s.contains("skipping marimo AI provider config"));
         // env provisioned + activated, then sidecar, then marimo exec.
         let install = s.find("pixi install").unwrap();
         let activate = s.find("pixi shell-hook").unwrap();
