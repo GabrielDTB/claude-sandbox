@@ -161,15 +161,32 @@ pub fn write_script(
          #     ~/.claude/.credentials.json doubles as the provider api_key. No\n\
          #     autocomplete_model on purpose: inline completion fires per\n\
          #     keystroke and would chew through subscription quota.\n\
+         # The advertised model list is fetched live from /v1/models at startup:\n\
+         # marimo cannot list models from an OpenAI-compatible provider itself\n\
+         # (Anthropic's endpoint wants an `anthropic-version` header the openai\n\
+         # client never sends), and a hardcoded list goes stale as models ship.\n\
+         # The python below is flat (single-line suites) because this template\n\
+         # strips leading whitespace; it degrades to a static fallback list if\n\
+         # the listing fails, and to an AI-less config if creds are missing.\n\
          if [ ! -f \"$HOME/.config/marimo/marimo.toml\" ]; then\n\
          mkdir -p \"$HOME/.config/marimo\"\n\
          printf '[experimental]\\nexternal_agents = true\\n\\n[package_management]\\nmanager = \"pixi\"\\n' > \"$HOME/.config/marimo/marimo.toml\"\n\
-         proxy_token=\"$(python -c 'import json,os;print(json.load(open(os.path.expanduser(\"~/.claude/.credentials.json\")))[\"claudeAiOauth\"][\"accessToken\"])' 2>/dev/null || true)\"\n\
-         if [ -n \"$proxy_token\" ] && [ -n \"${{ANTHROPIC_BASE_URL-}}\" ]; then\n\
-         printf '\\n[ai.models]\\nchat_model = \"claude-proxy/claude-sonnet-4-6\"\\nedit_model = \"claude-proxy/claude-sonnet-4-6\"\\ncustom_models = [\"claude-proxy/claude-opus-4-8\", \"claude-proxy/claude-sonnet-4-6\", \"claude-proxy/claude-haiku-4-5-20251001\"]\\n\\n[ai.custom_providers.claude-proxy]\\napi_key = \"%s\"\\nbase_url = \"%s/v1/\"\\n' \"$proxy_token\" \"$ANTHROPIC_BASE_URL\" >> \"$HOME/.config/marimo/marimo.toml\"\n\
-         else\n\
-         echo 'claude-sandboxed: no proxy creds/base-url found; skipping marimo AI provider config' >&2\n\
-         fi\n\
+         python - <<'MARIMO_AI' >> \"$HOME/.config/marimo/marimo.toml\" || true\n\
+         import json, os, sys, urllib.request\n\
+         try: tok = json.load(open(os.path.expanduser(\"~/.claude/.credentials.json\")))[\"claudeAiOauth\"][\"accessToken\"]\n\
+         except Exception: sys.stderr.write(\"claude-sandboxed: no proxy creds; skipping marimo AI provider config\\n\"); sys.exit(0)\n\
+         base = os.environ.get(\"ANTHROPIC_BASE_URL\", \"\")\n\
+         if not base: sys.stderr.write(\"claude-sandboxed: ANTHROPIC_BASE_URL unset; skipping marimo AI provider config\\n\"); sys.exit(0)\n\
+         models = [\"claude-opus-4-8\", \"claude-sonnet-4-6\", \"claude-haiku-4-5-20251001\"]\n\
+         req = urllib.request.Request(base + \"/v1/models?limit=100\")\n\
+         req.add_header(\"Authorization\", \"Bearer \" + tok)\n\
+         req.add_header(\"anthropic-version\", \"2023-06-01\")\n\
+         try: models = list(m[\"id\"] for m in json.load(urllib.request.urlopen(req, timeout=15))[\"data\"]) or models\n\
+         except Exception as e: sys.stderr.write(\"claude-sandboxed: model listing failed (%s); advertising fallback models\\n\" % e)\n\
+         default = next((m for m in models if m.startswith(\"claude-sonnet\")), models[0])\n\
+         cm = \", \".join('\"claude-proxy/%s\"' % m for m in models)\n\
+         sys.stdout.write('\\n[ai.models]\\nchat_model = \"claude-proxy/%s\"\\nedit_model = \"claude-proxy/%s\"\\ncustom_models = [%s]\\n\\n[ai.custom_providers.claude-proxy]\\napi_key = \"%s\"\\nbase_url = \"%s/v1/\"\\n' % (default, default, cm, tok, base))\n\
+         MARIMO_AI\n\
          fi\n\
          # ACP sidecar: bridge claude-code-acp's stdio onto a WebSocket the\n\
          # browser-side marimo agent panel auto-connects to at\n\
@@ -290,15 +307,20 @@ mod tests {
         assert!(s.contains("[package_management]"));
         assert!(s.contains("manager = \"pixi\""));
         // AI provider through the auth proxy: openai package installed, custom
-        // provider seeded from the stub token + ANTHROPIC_BASE_URL (guarded so
-        // a missing token degrades to a working notebook without AI).
+        // provider seeded from the stub token + ANTHROPIC_BASE_URL, model list
+        // fetched live from /v1/models (with the anthropic-version header the
+        // openai client can't send). Missing creds degrade to a working
+        // notebook without AI; a failed listing degrades to fallback models.
         assert!(s.contains("pixi add --pypi openai"));
         assert!(s.contains("[ai.custom_providers.claude-proxy]"));
         assert!(s.contains("api_key = \"%s\""));
         assert!(s.contains("base_url = \"%s/v1/\""));
-        assert!(s.contains("edit_model = \"claude-proxy/claude-sonnet-4-6\""));
+        assert!(s.contains("edit_model = \"claude-proxy/%s\""));
+        assert!(s.contains("/v1/models?limit=100"));
+        assert!(s.contains("anthropic-version"));
         assert!(s.contains("claudeAiOauth"));
         assert!(s.contains("skipping marimo AI provider config"));
+        assert!(s.contains("advertising fallback models"));
         // env provisioned + activated, then sidecar, then marimo exec.
         let install = s.find("pixi install").unwrap();
         let activate = s.find("pixi shell-hook").unwrap();
