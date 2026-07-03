@@ -120,8 +120,32 @@ pub fn write_script(
          printf '[experimental]\\nexternal_agents = true\\n\\n[package_management]\\nmanager = \"pixi\"\\n' > \"$HOME/.config/marimo/marimo.toml\"\n\
          fi\n\
          # ACP sidecar: bridge claude-code-acp's stdio onto a WebSocket the\n\
-         # browser-side marimo agent panel connects to.\n\
-         stdio-to-ws \"claude-code-acp\" --port {acp_port} &\n\
+         # browser-side marimo agent panel auto-connects to at\n\
+         # ws://<host>:{acp_port}/message. Resolve both vendored binaries up\n\
+         # front so a missing/renamed binary fails LOUDLY here instead of\n\
+         # silently dying in the background (a backgrounded crash under `set -e`\n\
+         # is invisible and leaves marimo's panel stuck on \"connect to an\n\
+         # agent\"). PATH still contains the nix /bin after the shell-hook's\n\
+         # prepend, so command -v resolves the store symlinks.\n\
+         acp_bridge=\"$(command -v stdio-to-ws || true)\"\n\
+         acp_agent=\"$(command -v claude-code-acp || true)\"\n\
+         if [ -z \"$acp_bridge\" ] || [ -z \"$acp_agent\" ]; then\n\
+         echo \"claude-sandboxed: ERROR: ACP bridge missing (stdio-to-ws='$acp_bridge' claude-code-acp='$acp_agent'); marimo agent panel will not connect.\" >&2\n\
+         else\n\
+         acp_log=\"$HOME/.cache/claude-sandboxed/acp.log\"\n\
+         mkdir -p \"$HOME/.cache/claude-sandboxed\"\n\
+         # Supervise so a transient crash doesn't permanently disconnect the\n\
+         # panel. The adapter is passed to stdio-to-ws by absolute path so its\n\
+         # child spawn doesn't depend on PATH; bridge + adapter output is\n\
+         # appended to $acp_log for post-mortem. `&& rc=0 || rc=$?` both\n\
+         # neutralizes `set -e` and captures the real exit code.\n\
+         ( while true; do\n\
+         \"$acp_bridge\" \"$acp_agent\" --port {acp_port} >>\"$acp_log\" 2>&1 && rc=0 || rc=$?\n\
+         echo \"claude-sandboxed: ACP bridge exited (rc=$rc), restarting in 2s; see $acp_log\" >&2\n\
+         sleep 2\n\
+         done ) &\n\
+         echo \"claude-sandboxed: ACP bridge supervised (pid $!) on port {acp_port}, logging to $acp_log\" >&2\n\
+         fi\n\
          # Notebook server in the foreground (owns the PTY), run inside the pixi\n\
          # env so its kernel installs/imports land there. --host 0.0.0.0 so the\n\
          # published loopback port reaches it; --proxy localhost:{marimo_port} so\n\
@@ -179,7 +203,11 @@ mod tests {
         let f = NamedTempFile::new().unwrap();
         write_script(f.path(), "/workspace/notebook.py", 3017, 2718).unwrap();
         let s = fs::read_to_string(f.path()).unwrap();
-        assert!(s.contains("stdio-to-ws \"claude-code-acp\" --port 3017"));
+        // ACP bridge: binaries resolved up front, supervised, logged.
+        assert!(s.contains("command -v stdio-to-ws"));
+        assert!(s.contains("command -v claude-code-acp"));
+        assert!(s.contains("\"$acp_bridge\" \"$acp_agent\" --port 3017"));
+        assert!(s.contains(".cache/claude-sandboxed/acp.log"));
         assert!(s.contains("marimo edit '/workspace/notebook.py'"));
         assert!(s.contains("--port 2718"));
         assert!(s.contains("--proxy localhost:2718"));
