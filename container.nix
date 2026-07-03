@@ -156,6 +156,17 @@ let
       for b in claude-code-acp stdio-to-ws; do
         ln -s "$pkgdir/node_modules/.bin/$b" "$out/bin/$b"
       done
+      # Upstream hardcodes every new ACP session to permission mode "default"
+      # with no override, so `--permissive` would be a no-op in notebook mode.
+      # Patch it to honor $CLAUDE_ACP_PERMISSION_MODE (the launcher sets
+      # `bypassPermissions` under --permissive; see run.rs). --replace-fail
+      # makes an adapter version bump that moves this line break the build
+      # instead of silently dropping the knob.
+      substituteInPlace \
+        "$pkgdir/node_modules/@zed-industries/claude-code-acp/dist/acp-agent.js" \
+        --replace-fail \
+          'const permissionMode = "default";' \
+          'const permissionMode = process.env.CLAUDE_ACP_PERMISSION_MODE || "default";'
     '';
   };
 

@@ -275,6 +275,15 @@ pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, 
             "{}:/notebook-entrypoint.sh:ro",
             state.notebook_script().display()
         )));
+        // `--permissive` for the notebook agent. Claude runs behind the ACP
+        // adapter here (no CLI flags of ours reach it), so the vendored
+        // claude-code-acp is patched at image build time (container.nix) to
+        // read this variable and open ACP sessions in the given permission
+        // mode instead of upstream's hardcoded "default".
+        if cli.permissive {
+            push!("-e");
+            push!("CLAUDE_ACP_PERMISSION_MODE=bypassPermissions");
+        }
     }
 
     // Image tag terminates the `podman run` flags.

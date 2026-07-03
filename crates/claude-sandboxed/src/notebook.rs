@@ -11,7 +11,10 @@
 //! the notebook (and its agent panel) from a browser outside the sandbox. The
 //! ACP sidecar's own Claude requests inherit `ANTHROPIC_BASE_URL` + the stub
 //! creds already present in the container, so they flow through the auth proxy
-//! like the normal Claude TUI.
+//! like the normal Claude TUI. `--permissive` is honored too: `run.rs` sets
+//! `CLAUDE_ACP_PERMISSION_MODE=bypassPermissions` in the container env, which
+//! the vendored `claude-code-acp` (patched in `container.nix`) reads as the
+//! starting permission mode for every ACP session.
 //!
 //! The Python environment is provisioned by `pixi`: the entrypoint declares a
 //! `[tool.pixi]` environment in the workspace `pyproject.toml` (seeding it, and

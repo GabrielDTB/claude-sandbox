@@ -81,7 +81,8 @@ pub const REFERENCE: &str = "\
 # When true, behaves as if --permissive were passed on every run AND seeds
 # `skipDangerousModePermissionPrompt: true` into a fresh sandbox's
 # claude/settings.json so the \"bypass permissions\" prompt is suppressed
-# durably. Equivalent to --permissive when no CLI flag is given.
+# durably. Equivalent to --permissive when no CLI flag is given. Under
+# --marimo, starts the notebook's ACP agent in `bypassPermissions` mode.
 # permissive = true
 
 # --- GitHub integration -----------------------------------------------------
@@ -190,7 +191,8 @@ pub struct Config {
     /// Same "new-sandbox-only" semantics as `default_model`.
     pub default_theme: Option<String>,
     /// When true, behave as if `--permissive` were passed on every launch
-    /// (Claude Code gets `--dangerously-skip-permissions`) AND seed
+    /// (Claude Code gets `--dangerously-skip-permissions`; under `--marimo`
+    /// the notebook's ACP agent starts in `bypassPermissions` mode) AND seed
     /// `skipDangerousModePermissionPrompt: true` into a fresh sandbox's
     /// `claude/settings.json`. The CLI `--permissive` flag keeps working
     /// independently; this only provides a durable default.

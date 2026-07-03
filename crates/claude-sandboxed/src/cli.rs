@@ -96,7 +96,8 @@ pub struct Cli {
     #[arg(long = "notebook-file", value_name = "PATH", requires = "marimo")]
     pub notebook_file: Option<PathBuf>,
 
-    /// Pass --dangerously-skip-permissions to claude
+    /// Pass --dangerously-skip-permissions to claude. Under --marimo the
+    /// notebook's ACP agent starts in `bypassPermissions` mode instead.
     #[arg(long)]
     pub permissive: bool,
 
