@@ -21,7 +21,13 @@
 //! `marimo` from PyPI, if absent), creates the per-sandbox env at
 //! `/workspace/.pixi`, and runs marimo inside it so an in-cell `pixi add`
 //! reaches the live kernel. Pixi's lockfile reconciles dependency adds/removals,
-//! so there is no manual change-gating here.
+//! so there is no manual change-gating here. The workspace itself is never
+//! installed into the env: `pixi init` registers it as an editable PyPI package
+//! (`<name> = { path = ".", editable = true }`), which turns `pixi install`
+//! into a wheel build of `/workspace` — fatal for any workspace that isn't a
+//! well-formed python package — so the entrypoint strips that dep right after
+//! init (and drops the stale one from workspaces provisioned before the strip
+//! existed, when its package dir is missing and the build could never succeed).
 //!
 //! Marimo's own AI features ("generate with AI", AI chat) are wired to the
 //! same auth proxy: the seeded config registers an OpenAI-compatible custom
@@ -106,11 +112,40 @@ pub fn write_script(
          # One pixi environment per sandbox at /workspace/.pixi, declared in the\n\
          # workspace pyproject.toml's [tool.pixi] tables. `pixi init` augments an\n\
          # existing pyproject (or creates one); any PEP 621 [project.dependencies]\n\
-         # already present are picked up by pixi as PyPI deps. marimo runs INSIDE\n\
-         # this env (not borrowed from a read-only nix interpreter as the old uv\n\
-         # path did), so an in-cell `pixi add` reaches the live kernel.\n\
+         # already present are picked up by pixi as PyPI deps. The workspace is\n\
+         # treated as an ENVIRONMENT, not an installable package -- see the\n\
+         # self-install strip below. marimo runs INSIDE this env (not borrowed\n\
+         # from a read-only nix interpreter as the old uv path did), so an\n\
+         # in-cell `pixi add` reaches the live kernel.\n\
          if ! grep -q '\\[tool\\.pixi' pyproject.toml 2>/dev/null; then\n\
+         had_pyproject=0\n\
+         [ -f pyproject.toml ] && had_pyproject=1\n\
          pixi init --format pyproject .\n\
+         # pixi init also registers the workspace itself as an editable PyPI\n\
+         # package (`<name> = {{ path = \".\", editable = true }}`), which makes\n\
+         # `pixi install` BUILD /workspace as a python package. Most workspaces\n\
+         # aren't one, and the build backend then kills provisioning (\"unable to\n\
+         # determine which files to ship\"). The env doesn't need it either way:\n\
+         # pixi picks up [project.dependencies] directly. Drop the dep pixi just\n\
+         # added ([tool.pixi] was absent a moment ago, so it can't be the user's).\n\
+         sed -i '/^[^ ]* = {{ path = \"\\.\", editable = true }}$/d' pyproject.toml\n\
+         # On a fresh pyproject, pixi also scaffolds src/workspace/__init__.py\n\
+         # for that self-install; remove the now-pointless empty stub (rmdir\n\
+         # only reaps the dirs if nothing else lives there).\n\
+         if [ \"$had_pyproject\" = 0 ] && [ ! -s src/workspace/__init__.py ]; then\n\
+         rm -f src/workspace/__init__.py\n\
+         rmdir src/workspace src 2>/dev/null || true\n\
+         fi\n\
+         fi\n\
+         # Recover workspaces poisoned by a pixi init that predates the strip\n\
+         # above: an editable self-dep named \"workspace\" (always the generated\n\
+         # name -- the mount point) whose package dir is gone can never build.\n\
+         # Only that exact generated line is dropped, and only when the build is\n\
+         # guaranteed to fail.\n\
+         if grep -q '^workspace = {{ path = \"\\.\", editable = true }}$' pyproject.toml 2>/dev/null \\\n\
+         && [ ! -e workspace/__init__.py ] && [ ! -e src/workspace/__init__.py ]; then\n\
+         echo 'claude-sandboxed: dropping stale editable self-install of /workspace (package dir missing; pixi install would fail)' >&2\n\
+         sed -i '/^workspace = {{ path = \"\\.\", editable = true }}$/d' pyproject.toml\n\
          fi\n\
          # Base interpreter (conda) + marimo (PyPI). Idempotent: each `pixi add`\n\
          # is skipped when the dep is already declared, so a committed manifest\n\
@@ -288,6 +323,19 @@ mod tests {
         assert!(s.contains("pixi init --format pyproject ."));
         assert!(s.contains("pixi add --pypi marimo"));
         assert!(s.contains("pixi install"));
+        // The workspace is never installed into the env as an editable
+        // package: pixi init's self-dep is stripped right after init, the
+        // fresh-pyproject scaffold stub is removed, and a stale self-dep
+        // from a pre-strip provisioning is dropped when its package dir is
+        // gone (the wheel build could never succeed).
+        assert!(s.contains(r#"sed -i '/^[^ ]* = { path = "\.", editable = true }$/d' pyproject.toml"#));
+        assert!(s.contains("rm -f src/workspace/__init__.py"));
+        assert!(s.contains("rmdir src/workspace src 2>/dev/null || true"));
+        assert!(s.contains(r#"grep -q '^workspace = { path = "\.", editable = true }$' pyproject.toml"#));
+        assert!(s.contains("dropping stale editable self-install"));
+        // Both strips happen before the env is solved.
+        let strip = s.find(r#"sed -i '/^workspace = "#).unwrap();
+        assert!(strip < s.find("\npixi install\n").unwrap());
         assert!(s.contains("eval \"$(pixi shell-hook)\""));
         assert!(s.contains("exec marimo edit"));
         // pixi shim: real binary resolved BEFORE the shell-hook defines a
@@ -336,3 +384,4 @@ mod tests {
         assert_eq!(mode, 0o755);
     }
 }
+
