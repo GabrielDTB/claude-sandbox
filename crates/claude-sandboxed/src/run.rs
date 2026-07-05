@@ -277,9 +277,9 @@ pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, 
         )));
         // `--permissive` for the notebook agent. Claude runs behind the ACP
         // adapter here (no CLI flags of ours reach it), so the vendored
-        // claude-code-acp is patched at image build time (container.nix) to
+        // claude-agent-acp is patched at image build time (container.nix) to
         // read this variable and open ACP sessions in the given permission
-        // mode instead of upstream's hardcoded "default".
+        // mode instead of upstream's settings-file default.
         if cli.permissive {
             push!("-e");
             push!("CLAUDE_ACP_PERMISSION_MODE=bypassPermissions");

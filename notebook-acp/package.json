@@ -4,7 +4,14 @@
   "private": true,
   "description": "Vendored npm closure for claude-sandboxed --marimo mode: the Claude Code ACP adapter plus the stdio-to-websocket bridge marimo connects to.",
   "dependencies": {
-    "@zed-industries/claude-code-acp": "0.16.2",
+    "@agentclientprotocol/claude-agent-acp": "0.39.0",
     "stdio-to-ws": "0.2.0"
+  },
+  "comments": {
+    "adapter-pin": "0.39.0 is the last claude-agent-acp that returns the dedicated ACP `models` field (SessionModelState) and implements `session/set_model`. marimo's agent panel (<=0.23.x) reads that field and renders nothing when it is absent; 0.40.0+ moved models into generic `configOptions`, which marimo does not consume. See notebook.rs / the memory note.",
+    "sdk-override": "0.39.0 bundles @anthropic-ai/claude-agent-sdk 0.3.156, whose model catalog predates Fable 5. The catalog the panel shows is whatever the SDK reports via initializationResult.models, so we override the SDK to 0.3.198 (Fable 5 / Opus 4.8 / Sonnet 5). Stays within 0.3.x, and both 0.39.0 and 0.55.0 read the same {value,displayName,description} model shape, so the override is a data bump, not an API change."
+  },
+  "overrides": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.198"
   }
 }

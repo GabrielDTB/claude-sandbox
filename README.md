@@ -205,7 +205,7 @@ Short-circuits before any filesystem or podman work, so it runs fine in environm
 ### Marimo notebook mode
 
 `--marimo` swaps the Claude TUI for a [Marimo](https://marimo.io) notebook server plus a
-[`@zed-industries/claude-code-acp`](https://github.com/zed-industries/claude-code-acp) sidecar,
+[`@agentclientprotocol/claude-agent-acp`](https://github.com/agentclientprotocol/claude-agent-acp) sidecar,
 both running **inside** the sandbox. Marimo's agent panel drives Claude Code over ACP, while you
 edit the notebook from a browser **outside** the sandbox.
 
@@ -232,7 +232,7 @@ claude-sandboxed ~/proj --marimo --notebook-file nb.py # edits /workspace/nb.py
   the terminal.
 - Open the **agent panel** (agents icon in the sidebar) and select **Claude Code** from the dropdown.
   Marimo's frontend connects directly to `ws://localhost:3017`, which the forwarded port routes to the
-  in-sandbox `claude-code-acp` bridge — no command to run and no URL to enter. The sidecar's Claude
+  in-sandbox `claude-agent-acp` bridge — no command to run and no URL to enter. The sidecar's Claude
   requests flow through the same auth proxy as the normal TUI, so no extra credentials are needed.
 - Because the ports are fixed, only one `--marimo` sandbox can run at a time per host.
 

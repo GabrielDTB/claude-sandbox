@@ -144,29 +144,64 @@ let
   # no `npx`/registry fetch at sandbox launch. postInstall surfaces the two
   # dependency CLIs on $out/bin; their `#!/usr/bin/env node` shebangs resolve
   # against the `nodejs` we add to the notebook image below.
+  #
+  # The adapter is pinned to claude-agent-acp 0.39.0 ON PURPOSE — DO NOT bump it
+  # to latest. 0.39.0 is the last release that returns the dedicated ACP `models`
+  # field (SessionModelState) from session/new and implements the `session/set_model`
+  # RPC. marimo's agent panel (<=0.23.x) reads that field to render the model
+  # picker and calls `session/set_model` to switch models; when the field is
+  # absent it renders NOTHING. 0.40.0+ moved models into generic `configOptions`,
+  # which marimo does not consume — bumping past 0.39.0 makes the picker vanish.
+  # The catalog the picker shows is whatever the SDK reports via
+  # initializationResult.models, so we override the bundled
+  # @anthropic-ai/claude-agent-sdk (0.39.0 ships 0.3.156, pre-Fable-5) up to
+  # 0.3.198 in notebook-acp/package.json's `overrides` — same 0.3.x line, same
+  # {value,displayName,description} model shape, so it's a catalog bump, not an
+  # API change. See notebook.rs and the notebook-acp-sidecar memory note.
   acpSidecar = buildNpmPackage {
     pname = "claude-sandbox-notebook-acp";
     version = "0.0.0";
     src = ./notebook-acp;
-    npmDepsHash = "sha256-Z6nHxCsmiyjXrBu3PaXtPvePnk3xMndykz0Unhyhxws=";
+    # TODO: real hash needs a networked build (this sandbox can't reach the npm
+    # registry via nix's fetcher). Run `prefetch-npm-deps
+    # notebook-acp/package-lock.json`, or build once and copy the "got:" hash
+    # from the fakeHash mismatch below.
+    npmDepsHash = "sha256-a/TVWfZ7LprAgwoXCDBftR//J72bzA2Zz85BFzT+E8M=";
     dontNpmBuild = true;
     postInstall = ''
       mkdir -p $out/bin
       pkgdir=$out/lib/node_modules/claude-sandbox-notebook-acp
-      for b in claude-code-acp stdio-to-ws; do
+      for b in claude-agent-acp stdio-to-ws; do
         ln -s "$pkgdir/node_modules/.bin/$b" "$out/bin/$b"
       done
-      # Upstream hardcodes every new ACP session to permission mode "default"
-      # with no override, so `--permissive` would be a no-op in notebook mode.
-      # Patch it to honor $CLAUDE_ACP_PERMISSION_MODE (the launcher sets
-      # `bypassPermissions` under --permissive; see run.rs). --replace-fail
-      # makes an adapter version bump that moves this line break the build
-      # instead of silently dropping the knob.
+      # Upstream seeds each new ACP session's permission mode from the Claude
+      # settings file only (permissions.defaultMode), so `--permissive` would
+      # be a no-op in notebook mode. Patch it to honor
+      # $CLAUDE_ACP_PERMISSION_MODE (the launcher sets `bypassPermissions`
+      # under --permissive; see run.rs). --replace-fail makes an adapter
+      # version bump that moves this line break the build instead of silently
+      # dropping the knob.
       substituteInPlace \
-        "$pkgdir/node_modules/@zed-industries/claude-code-acp/dist/acp-agent.js" \
+        "$pkgdir/node_modules/@agentclientprotocol/claude-agent-acp/dist/acp-agent.js" \
         --replace-fail \
-          'const permissionMode = "default";' \
-          'const permissionMode = process.env.CLAUDE_ACP_PERMISSION_MODE || "default";'
+          'const permissionMode = resolvePermissionMode(settingsManager.getSettings().permissions?.defaultMode, this.logger);' \
+          'const permissionMode = process.env.CLAUDE_ACP_PERMISSION_MODE || resolvePermissionMode(settingsManager.getSettings().permissions?.defaultMode, this.logger);'
+      # We seed the ACP `availableModels` allowlist from the live /v1/models
+      # list (see notebook.rs) so the panel picker matches marimo's chat list.
+      # But applyAvailableModelsAllowlist RELABELS each allowlisted id with the
+      # display name AND description of the nearest SDK model it fuzzy-matches, so
+      # distinct ids (e.g. every sonnet variant) collapse to duplicate rows all
+      # reading "Sonnet 5" with the wrong blurb (a sonnet-4-6 id inheriting Sonnet
+      # 5's "Efficient for routine tasks"). Keep the SDK match's capability
+      # metadata (effort levels, auto-mode gating come from the spread) but show
+      # each entry by its own id with no misleading description, exactly like the
+      # chat picker. The unmatched branch already uses `displayName: trimmed,
+      # description: ""`; this makes the matched branch consistent.
+      substituteInPlace \
+        "$pkgdir/node_modules/@agentclientprotocol/claude-agent-acp/dist/acp-agent.js" \
+        --replace-fail \
+          'result.push({ ...sdkMatch, value: trimmed });' \
+          'result.push({ ...sdkMatch, value: trimmed, displayName: trimmed, description: "" });'
     '';
   };
 

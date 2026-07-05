@@ -2,7 +2,7 @@
 //!
 //! Instead of dropping into the Claude TUI, the notebook mode runs two
 //! processes inside the sandbox:
-//!   * a `stdio-to-ws` bridge wrapping `claude-code-acp`, exposing the Claude
+//!   * a `stdio-to-ws` bridge wrapping `claude-agent-acp`, exposing the Claude
 //!     Code ACP agent over a WebSocket on [`crate::constants::ACP_PORT`];
 //!   * `marimo edit` on a workspace file, serving the notebook UI on
 //!     [`crate::constants::MARIMO_PORT`].
@@ -13,7 +13,7 @@
 //! creds already present in the container, so they flow through the auth proxy
 //! like the normal Claude TUI. `--permissive` is honored too: `run.rs` sets
 //! `CLAUDE_ACP_PERMISSION_MODE=bypassPermissions` in the container env, which
-//! the vendored `claude-code-acp` (patched in `container.nix`) reads as the
+//! the vendored `claude-agent-acp` (patched in `container.nix`) reads as the
 //! starting permission mode for every ACP session.
 //!
 //! The Python environment is provisioned by `pixi`: the entrypoint declares a
@@ -34,7 +34,15 @@
 //! provider pointing at `$ANTHROPIC_BASE_URL/v1/` (Anthropic's OpenAI-compat
 //! endpoint, reachable through the proxy's `/v1/` allowlist) using the stub
 //! sandbox-to-proxy token as the api_key, since the openai client transmits it
-//! as the `Authorization: Bearer` header the proxy authenticates.
+//! as the `Authorization: Bearer` header the proxy authenticates. That chat
+//! model list is fetched live from `/v1/models` at startup.
+//!
+//! The ACP agent panel is a separate surface whose model list comes from the
+//! sidecar SDK's bundled catalog, not `/v1/models`. To give it the same
+//! completeness, the entrypoint writes that same live `/v1/models` list into
+//! `~/.claude/settings.json`'s `availableModels`, which `claude-agent-acp`
+//! consumes as an allowlist and surfaces in its picker. On a failed fetch it
+//! leaves the key unset and the adapter falls back to the SDK catalog.
 //!
 //! A `pixi` shim is placed on the kernel's PATH to work around rattler pinning
 //! directory mtimes to 1980: CPython's `FileFinder` only re-scans a directory
@@ -188,7 +196,7 @@ pub fn write_script(
          # Seed marimo config (skip if one was already provided):\n\
          #   * experimental.external_agents = true  -> the ACP agent panel is\n\
          #     enabled out of the box (no manual Lab toggle); marimo's frontend\n\
-         #     then connects to the claude-code-acp bridge at ws://localhost:{acp_port}.\n\
+         #     then connects to the claude-agent-acp bridge at ws://localhost:{acp_port}.\n\
          #   * package_management.manager = pixi  -> in-cell installs go through\n\
          #     pixi (which owns the active env) instead of pip.\n\
          #   * ai.custom_providers.claude-proxy -> \"generate with AI\" / AI chat\n\
@@ -226,7 +234,40 @@ pub fn write_script(
          sys.stdout.write('\\n[ai.models]\\nchat_model = \"claude-proxy/%s\"\\nedit_model = \"claude-proxy/%s\"\\ncustom_models = [%s]\\n\\n[ai.custom_providers.claude-proxy]\\napi_key = \"%s\"\\nbase_url = \"%s/v1/\"\\n' % (default, default, cm, tok, base))\n\
          MARIMO_AI\n\
          fi\n\
-         # ACP sidecar: bridge claude-code-acp's stdio onto a WebSocket the\n\
+         # Seed the ACP agent panel's model picker from the SAME live /v1/models\n\
+         # list the chat provider uses, so it lists every model the account\n\
+         # exposes instead of the sidecar SDK's bundled (and eventually stale)\n\
+         # catalog. claude-agent-acp reads settings.json's `availableModels` as an\n\
+         # allowlist and surfaces exactly those ids, each shown by its own id to\n\
+         # match the chat picker (the adapter's fuzzy name/description relabeling\n\
+         # is patched out in container.nix; effort levels are still inherited from\n\
+         # the SDK match). A `default` entry is always kept. Only written when the\n\
+         # key is absent (a host/user-set allowlist wins) and only on a\n\
+         # successful fetch -- otherwise the adapter falls back to its SDK\n\
+         # catalog. Reuses the proxy token + creds plumbing\n\
+         # from the block above; the adapter watches settings.json, so this is\n\
+         # picked up whether it lands before or after the sidecar starts.\n\
+         python - <<'ACP_MODELS' || true\n\
+         import json, os, sys, urllib.request\n\
+         sp = os.path.expanduser(\"~/.claude/settings.json\")\n\
+         try: tok = json.load(open(os.path.expanduser(\"~/.claude/.credentials.json\")))[\"claudeAiOauth\"][\"accessToken\"]\n\
+         except Exception: sys.stderr.write(\"claude-sandboxed: no proxy creds; leaving agent-panel models to the sidecar SDK catalog\\n\"); sys.exit(0)\n\
+         base = os.environ.get(\"ANTHROPIC_BASE_URL\", \"\")\n\
+         if not base: sys.exit(0)\n\
+         try: settings = json.load(open(sp))\n\
+         except Exception: settings = dict()\n\
+         if not isinstance(settings, dict) or \"availableModels\" in settings: sys.exit(0)\n\
+         req = urllib.request.Request(base + \"/v1/models?limit=100\")\n\
+         req.add_header(\"Authorization\", \"Bearer \" + tok)\n\
+         req.add_header(\"anthropic-version\", \"2023-06-01\")\n\
+         try: ids = list(m[\"id\"] for m in json.load(urllib.request.urlopen(req, timeout=15))[\"data\"])\n\
+         except Exception as e: sys.stderr.write(\"claude-sandboxed: agent-panel model listing failed (%s); using sidecar SDK catalog\\n\" % e); sys.exit(0)\n\
+         if not ids: sys.exit(0)\n\
+         settings[\"availableModels\"] = ids\n\
+         try: json.dump(settings, open(sp, \"w\"), indent=2)\n\
+         except Exception as e: sys.stderr.write(\"claude-sandboxed: could not write availableModels to settings.json (%s)\\n\" % e)\n\
+         ACP_MODELS\n\
+         # ACP sidecar: bridge claude-agent-acp's stdio onto a WebSocket the\n\
          # browser-side marimo agent panel auto-connects to at\n\
          # ws://<host>:{acp_port}/message. Resolve both vendored binaries up\n\
          # front so a missing/renamed binary fails LOUDLY here instead of\n\
@@ -235,9 +276,9 @@ pub fn write_script(
          # agent\"). PATH still contains the nix /bin after the shell-hook's\n\
          # prepend, so command -v resolves the store symlinks.\n\
          acp_bridge=\"$(command -v stdio-to-ws || true)\"\n\
-         acp_agent=\"$(command -v claude-code-acp || true)\"\n\
+         acp_agent=\"$(command -v claude-agent-acp || true)\"\n\
          if [ -z \"$acp_bridge\" ] || [ -z \"$acp_agent\" ]; then\n\
-         echo \"claude-sandboxed: ERROR: ACP bridge missing (stdio-to-ws='$acp_bridge' claude-code-acp='$acp_agent'); marimo agent panel will not connect.\" >&2\n\
+         echo \"claude-sandboxed: ERROR: ACP bridge missing (stdio-to-ws='$acp_bridge' claude-agent-acp='$acp_agent'); marimo agent panel will not connect.\" >&2\n\
          else\n\
          acp_log=\"$HOME/.cache/claude-sandboxed/acp.log\"\n\
          mkdir -p \"$HOME/.cache/claude-sandboxed\"\n\
@@ -312,7 +353,7 @@ mod tests {
         let s = fs::read_to_string(f.path()).unwrap();
         // ACP bridge: binaries resolved up front, supervised, logged.
         assert!(s.contains("command -v stdio-to-ws"));
-        assert!(s.contains("command -v claude-code-acp"));
+        assert!(s.contains("command -v claude-agent-acp"));
         assert!(s.contains("\"$acp_bridge\" \"$acp_agent\" --port 3017"));
         assert!(s.contains(".cache/claude-sandboxed/acp.log"));
         assert!(s.contains("marimo edit '/workspace/notebook.py'"));
@@ -372,6 +413,19 @@ mod tests {
         assert!(s.contains("claudeAiOauth"));
         assert!(s.contains("skipping marimo AI provider config"));
         assert!(s.contains("advertising fallback models"));
+        // Agent panel model picker: the same live /v1/models list is written to
+        // settings.json's `availableModels` (the claude-agent-acp allowlist), so
+        // the picker matches the chat provider's completeness. Merged into the
+        // seeded settings.json, only when the key is absent, degrading to the
+        // sidecar SDK catalog on a failed fetch.
+        assert!(s.contains(r#"settings["availableModels"] = ids"#));
+        assert!(s.contains(r#""availableModels" in settings"#));
+        assert!(s.contains(".claude/settings.json"));
+        assert!(s.contains("using sidecar SDK catalog"));
+        // Written before the sidecar starts (the adapter also watches the file,
+        // but ordering it first avoids a first-session race).
+        let avail = s.find(r#"settings["availableModels"] = ids"#).unwrap();
+        assert!(avail < s.find("stdio-to-ws").unwrap());
         // env provisioned + activated, then sidecar, then marimo exec.
         let install = s.find("pixi install").unwrap();
         let activate = s.find("pixi shell-hook").unwrap();
