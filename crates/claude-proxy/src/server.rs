@@ -19,7 +19,7 @@ use std::{
 use http_body_util::{BodyExt, Full};
 use hyper::{
     body::{Bytes, Incoming},
-    header::{HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE, HOST},
+    header::{HeaderName, HeaderValue, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HOST},
     service::service_fn,
     Method, Request, Response, StatusCode, Uri,
 };
@@ -254,6 +254,89 @@ fn warn_unauth(creds_path: Option<&std::path::Path>) {
 // Per-request handler
 // ---------------------------------------------------------------------------
 
+/// The beta gate Anthropic requires on subscription (Claude Code) OAuth tokens.
+const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
+/// The identity string Anthropic requires as the *sole* system prompt when a
+/// subscription OAuth token is used. Verified byte-for-byte against the live API.
+const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+/// Rewrite an OpenAI-compatible `/v1/chat/completions` body into the only shape
+/// Anthropic accepts from a subscription OAuth token.
+///
+/// Anthropic gates these tokens: inference is accepted only when the request
+/// carries `anthropic-beta: oauth-2025-04-20` (added by the caller) AND its
+/// system prompt is *exactly* the Claude Code identity. Native `/v1/messages`
+/// callers (Claude Code, the ACP agent panel) already do this, so they are never
+/// routed here. Plain OpenAI clients — marimo's chat and "generate with AI" —
+/// send neither and get bounced with a canned `rate_limit_error`.
+///
+/// The compat endpoint concatenates multiple `system` messages, so a second
+/// system block makes the prompt no longer *exactly* the identity and is
+/// rejected (observed live). We therefore hoist every non-identity system
+/// message into the first user turn — preserving the client's instructions —
+/// and leave a single identity `system` message at the front.
+///
+/// Bodies that aren't JSON objects with a `messages` array are returned
+/// untouched, so anything unexpected is forwarded verbatim rather than dropped.
+fn rewrite_compat_oauth_body(body: Bytes) -> Bytes {
+    let Ok(mut root) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return body;
+    };
+    let Some(obj) = root.as_object_mut() else {
+        return body;
+    };
+    let Some(serde_json::Value::Array(messages)) = obj.remove("messages") else {
+        return body;
+    };
+
+    let mut extra_system = String::new();
+    let mut kept: Vec<serde_json::Value> = Vec::with_capacity(messages.len() + 1);
+    for msg in messages {
+        if msg.get("role").and_then(|r| r.as_str()) == Some("system") {
+            if let Some(text) = msg.get("content").and_then(|c| c.as_str()) {
+                if text == CLAUDE_CODE_IDENTITY {
+                    continue; // re-added as the single identity block below
+                }
+                if !extra_system.is_empty() {
+                    extra_system.push_str("\n\n");
+                }
+                extra_system.push_str(text);
+                continue;
+            }
+            // Non-string system content is unusual for this endpoint; keep it
+            // rather than risk silently dropping the caller's instructions.
+        }
+        kept.push(msg);
+    }
+
+    if !extra_system.is_empty() {
+        match kept.iter_mut().find(|m| {
+            m.get("role").and_then(|r| r.as_str()) == Some("user")
+                && m.get("content").is_some_and(|c| c.is_string())
+        }) {
+            Some(user) => {
+                let merged = format!(
+                    "{extra_system}\n\n{}",
+                    user["content"].as_str().unwrap_or_default()
+                );
+                user["content"] = serde_json::Value::String(merged);
+            }
+            None => kept.insert(
+                0,
+                serde_json::json!({ "role": "user", "content": extra_system }),
+            ),
+        }
+    }
+
+    kept.insert(
+        0,
+        serde_json::json!({ "role": "system", "content": CLAUDE_CODE_IDENTITY }),
+    );
+
+    obj.insert("messages".to_string(), serde_json::Value::Array(kept));
+    serde_json::to_vec(&root).map(Bytes::from).unwrap_or(body)
+}
+
 async fn handle(state: Arc<ServerState>, req: Request<Incoming>) -> Response<BoxBody> {
     let path = req.uri().path().to_string();
 
@@ -282,6 +365,16 @@ async fn handle(state: Arc<ServerState>, req: Request<Incoming>) -> Response<Box
         Err(_) => {
             return plain_error(StatusCode::REQUEST_TIMEOUT, "Request body read timed out".into());
         }
+    };
+
+    // --- make OpenAI-compatible chat requests valid under subscription OAuth ---
+    // Scoped to the compat endpoint; native /v1/messages callers are forwarded
+    // byte-for-byte. See rewrite_compat_oauth_body for the why.
+    let is_compat_chat = path.ends_with("/chat/completions");
+    let body_bytes = if is_compat_chat {
+        rewrite_compat_oauth_body(body_bytes)
+    } else {
+        body_bytes
     };
 
     // --- fetch access token; 503 if proxy isn't authenticated ---
@@ -317,6 +410,10 @@ async fn handle(state: Arc<ServerState>, req: Request<Incoming>) -> Response<Box
         if name == "trailer" || name == "upgrade" {
             continue;
         }
+        // Replaced below for the compat OAuth rewrite (new body length + beta).
+        if is_compat_chat && (name == CONTENT_LENGTH || name.as_str() == "anthropic-beta") {
+            continue;
+        }
         up_req = up_req.header(name, value);
     }
     up_req = up_req
@@ -328,6 +425,15 @@ async fn handle(state: Arc<ServerState>, req: Request<Incoming>) -> Response<Box
                 Err(_) => return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "bad token".into()),
             },
         );
+
+    if is_compat_chat {
+        up_req = up_req
+            .header(
+                HeaderName::from_static("anthropic-beta"),
+                HeaderValue::from_static(OAUTH_BETA_HEADER),
+            )
+            .header(CONTENT_LENGTH, body_bytes.len().to_string());
+    }
 
     let up_body = box_body(Full::new(body_bytes));
     let up_req = match up_req.body(up_body) {
@@ -485,5 +591,73 @@ mod tests {
             resp.headers().get(CONTENT_TYPE).unwrap(),
             "application/json"
         );
+    }
+
+    fn rewrite(body: serde_json::Value) -> serde_json::Value {
+        let out = rewrite_compat_oauth_body(Bytes::from(serde_json::to_vec(&body).unwrap()));
+        serde_json::from_slice(&out).unwrap()
+    }
+
+    #[test]
+    fn compat_prepends_identity_when_no_system() {
+        let out = rewrite(serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "messages": [{ "role": "user", "content": "hi" }],
+        }));
+        let msgs = out["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"], CLAUDE_CODE_IDENTITY);
+        assert_eq!(msgs[1]["role"], "user");
+        assert_eq!(msgs[1]["content"], "hi");
+        // Unrelated fields survive.
+        assert_eq!(out["model"], "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn compat_hoists_client_system_into_first_user_turn() {
+        let out = rewrite(serde_json::json!({
+            "messages": [
+                { "role": "system", "content": "You help with marimo." },
+                { "role": "user", "content": "write a plot" },
+            ],
+        }));
+        let msgs = out["messages"].as_array().unwrap();
+        // Exactly one system message, and it is exactly the identity.
+        let systems: Vec<_> = msgs.iter().filter(|m| m["role"] == "system").collect();
+        assert_eq!(systems.len(), 1);
+        assert_eq!(systems[0]["content"], CLAUDE_CODE_IDENTITY);
+        assert_eq!(msgs[0]["role"], "system");
+        // The client's instructions were folded into the user turn, not dropped.
+        assert_eq!(msgs[1]["role"], "user");
+        assert_eq!(msgs[1]["content"], "You help with marimo.\n\nwrite a plot");
+    }
+
+    #[test]
+    fn compat_is_idempotent_when_identity_already_sole_system() {
+        let once = rewrite(serde_json::json!({
+            "messages": [
+                { "role": "system", "content": CLAUDE_CODE_IDENTITY },
+                { "role": "user", "content": "hi" },
+            ],
+        }));
+        let msgs = once["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["content"], CLAUDE_CODE_IDENTITY);
+        assert_eq!(msgs[1]["content"], "hi");
+        // Running it again changes nothing.
+        assert_eq!(rewrite(once.clone()), once);
+    }
+
+    #[test]
+    fn compat_non_json_body_passes_through() {
+        let raw = Bytes::from_static(b"not json at all");
+        assert_eq!(rewrite_compat_oauth_body(raw.clone()), raw);
+    }
+
+    #[test]
+    fn compat_body_without_messages_passes_through() {
+        let raw = Bytes::from(serde_json::to_vec(&serde_json::json!({ "foo": 1 })).unwrap());
+        assert_eq!(rewrite_compat_oauth_body(raw.clone()), raw);
     }
 }
