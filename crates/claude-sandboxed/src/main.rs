@@ -355,7 +355,19 @@ fn write_stub_creds(path: &std::path::Path, token: &str) -> Result<(), Error> {
         "claudeAiOauth": {
             "accessToken":      token,
             "refreshToken":     "stub",
-            "expiresAt":        0,
+            // Far-future expiry (2100-01-01) so no client ever treats the token
+            // as expired. The access token IS the sandbox-to-proxy token and
+            // never expires client-side (the proxy swaps in the real upstream
+            // creds), so any refresh attempt is both unnecessary and doomed:
+            // the OAuth token endpoint isn't in the proxy's /v1/* allowlist, and
+            // `refreshToken` is a stub. The Claude TUI tolerated `expiresAt: 0`
+            // by clearing the dud refresh token and proceeding, but the
+            // `--marimo` ACP sidecar's newer claude-agent-sdk instead attempts
+            // the refresh and surfaces its failure as a hard `authRequired`
+            // (JSON-RPC -32000, "Please run /login") on the first prompt — the
+            // agent panel then shows "Agent Error undefined". A non-expired
+            // `expiresAt` keeps every client off the refresh path entirely.
+            "expiresAt":        4_102_444_800_000_i64,
             "scopes": [
                 "user:profile",
                 "user:inference",
