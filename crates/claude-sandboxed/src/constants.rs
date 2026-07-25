@@ -53,6 +53,26 @@ pub const SANDBOX_CONTAINER_PREFIX: &str = "claude-sandbox-";
 /// siblings.
 pub const AUTH_PROXY_CONTAINER_PREFIX: &str = "claude-auth-proxy-";
 
+/// OAuth scopes advertised to the sandboxed Claude Code, via both
+/// `CLAUDE_CODE_OAUTH_SCOPES` and the stub `.credentials.json`. Claude gates
+/// inference on `user:inference` specifically; the rest mirror what a real
+/// subscription login carries so feature probes behave the same in and out of
+/// the sandbox. Kept here so the two emitters can't drift.
+pub const STUB_OAUTH_SCOPES: &[&str] = &[
+    "user:profile",
+    "user:inference",
+    "user:sessions:claude_code",
+    "user:mcp_servers",
+    "user:file_upload",
+];
+
+/// `subscriptionType` / `rateLimitTier` reported to the sandboxed Claude Code.
+/// Claude can't reach `/api/oauth/profile` from inside the sandbox (it is
+/// addressed at `api.anthropic.com` directly, bypassing `ANTHROPIC_BASE_URL`),
+/// so these are what it displays — they are not read from the real account.
+pub const STUB_SUBSCRIPTION_TYPE: &str = "pro";
+pub const STUB_RATE_LIMIT_TIER: &str = "standard";
+
 /// In-container port the Marimo notebook server listens on under `--marimo`.
 /// Published to host loopback (`127.0.0.1:<port>:<port>`) so the user opens
 /// the notebook from a host browser. Marimo's own default edit port.

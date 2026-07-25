@@ -280,6 +280,7 @@ fn run() -> Result<ExitCode, Error> {
         network: &network,
         container_name: &sandbox_name,
         proxy_container_name: proxy_name,
+        oauth_token: &token,
         dev_env: cli.dev_env().is_some(),
         globals: &selected_globals,
     };
@@ -337,6 +338,12 @@ fn has_podman() -> bool {
 /// file. Claude Code expects every key in the JSON shape below — missing
 /// fields cause it to reject the creds file on load.
 ///
+/// This is no longer what authenticates the Claude TUI: `run.rs` exports the
+/// same token as `CLAUDE_CODE_OAUTH_TOKEN`, which Claude consults first and
+/// which keeps it off the refresh path entirely. The file remains for the
+/// `--marimo` notebook, whose generated entrypoint reads `accessToken` out of
+/// it to configure the provider (see `notebook.rs`). Keep the two in sync.
+///
 /// A prior run's in-container claude may have left a file here owned by
 /// an unmapped subuid (shows up as e.g. `0:100000` on the host). We own
 /// the parent `claude/` dir, so we can unlink regardless of ownership;
@@ -360,23 +367,20 @@ fn write_stub_creds(path: &std::path::Path, token: &str) -> Result<(), Error> {
             // never expires client-side (the proxy swaps in the real upstream
             // creds), so any refresh attempt is both unnecessary and doomed:
             // the OAuth token endpoint isn't in the proxy's /v1/* allowlist, and
-            // `refreshToken` is a stub. The Claude TUI tolerated `expiresAt: 0`
-            // by clearing the dud refresh token and proceeding, but the
-            // `--marimo` ACP sidecar's newer claude-agent-sdk instead attempts
-            // the refresh and surfaces its failure as a hard `authRequired`
-            // (JSON-RPC -32000, "Please run /login") on the first prompt — the
-            // agent panel then shows "Agent Error undefined". A non-expired
-            // `expiresAt` keeps every client off the refresh path entirely.
+            // `refreshToken` is a stub. Without this, the `--marimo` ACP
+            // sidecar's claude-agent-sdk attempts the refresh and surfaces its
+            // failure as a hard `authRequired` (JSON-RPC -32000, "Please run
+            // /login") on the first prompt — the agent panel then shows "Agent
+            // Error undefined".
+            //
+            // Note this only guards the *expiry* check. A forced refresh
+            // ignores `expiresAt` entirely, which is why the TUI is
+            // authenticated by `CLAUDE_CODE_OAUTH_TOKEN` instead — see the
+            // env block in `run.rs`.
             "expiresAt":        4_102_444_800_000_i64,
-            "scopes": [
-                "user:profile",
-                "user:inference",
-                "user:sessions:claude_code",
-                "user:mcp_servers",
-                "user:file_upload"
-            ],
-            "subscriptionType": "pro",
-            "rateLimitTier":    "standard"
+            "scopes":           constants::STUB_OAUTH_SCOPES,
+            "subscriptionType": constants::STUB_SUBSCRIPTION_TYPE,
+            "rateLimitTier":    constants::STUB_RATE_LIMIT_TIER
         }
     });
     let mut buf = serde_json::to_vec(&body)?;
@@ -393,6 +397,48 @@ mod tests {
     #[test]
     fn no_cli_no_config_defaults_to_on_init() {
         assert_eq!(resolve_git_copy_mode(None, None, None), GitCopyMode::OnInit);
+    }
+
+    /// The notebook entrypoint (`notebook.rs`) parses this file with
+    /// `json.load(...)["claudeAiOauth"]["accessToken"]`, so the shape is a
+    /// contract, not an implementation detail. `scopes` in particular must
+    /// stay a JSON array of strings now that it is sourced from a constant.
+    #[test]
+    fn stub_creds_shape_is_what_claude_and_marimo_expect() {
+        let dir = std::env::temp_dir().join(format!("stub-creds-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".credentials.json");
+        write_stub_creds(&path, "deadbeef").unwrap();
+
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let oauth = &v["claudeAiOauth"];
+
+        assert_eq!(oauth["accessToken"], "deadbeef");
+        // A non-empty refreshToken keeps the file out of Claude's
+        // "dead refresh token" state, which is what `pnt()` keys on.
+        assert_eq!(oauth["refreshToken"], "stub");
+        assert!(oauth["expiresAt"].as_i64().unwrap() > constants::STUB_OAUTH_SCOPES.len() as i64);
+        assert_eq!(
+            oauth["scopes"].as_array().unwrap().len(),
+            constants::STUB_OAUTH_SCOPES.len()
+        );
+        assert_eq!(oauth["scopes"][1], "user:inference");
+        assert_eq!(oauth["subscriptionType"], constants::STUB_SUBSCRIPTION_TYPE);
+        assert_eq!(oauth["rateLimitTier"], constants::STUB_RATE_LIMIT_TIER);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The env var and the stub file must carry the same scope set — Claude
+    /// reads whichever it finds first, and a mismatch would mean the TUI and
+    /// the marimo sidecar disagree about what the token can do.
+    #[test]
+    fn oauth_scopes_env_round_trips_to_the_stub_list() {
+        let joined = constants::STUB_OAUTH_SCOPES.join(" ");
+        let split: Vec<&str> = joined.split_whitespace().collect();
+        assert_eq!(split, constants::STUB_OAUTH_SCOPES);
+        assert!(split.contains(&"user:inference"), "inference gate scope");
     }
 
     #[test]

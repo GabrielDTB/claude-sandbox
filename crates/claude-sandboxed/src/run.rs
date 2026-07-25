@@ -31,6 +31,10 @@ pub struct RunInputs<'a> {
     /// proxy (not ours to pause). Passed to the pty module so ^Z freezes
     /// both containers together.
     pub proxy_container_name: Option<&'a str>,
+    /// The minted sandbox-to-proxy bearer, exported as
+    /// `CLAUDE_CODE_OAUTH_TOKEN`. Same value as the stub credentials file's
+    /// `accessToken`; see the env block below for why both exist.
+    pub oauth_token: &'a str,
     /// true when --devenv or --flake was set.
     pub dev_env: bool,
     /// Resolved set of inherited skill directories to bind-mount
@@ -178,6 +182,43 @@ pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, 
     // Environment variables passed through.
     push!("-e");
     args.push(OsString::from(format!("ANTHROPIC_BASE_URL={}", inputs.proxy_url)));
+
+    // Auth for the sandboxed Claude. `CLAUDE_CODE_OAUTH_TOKEN` is checked
+    // ahead of `.credentials.json` and yields a creds object with a *null*
+    // refreshToken, which is the point: with no refresh token, Claude's
+    // refresh path returns `no_refresh_token` and exits before it can decide
+    // the token is dead. That matters because 2.1.211 changed the
+    // dead-refresh-token handler to clear `accessToken` and `expiresAt`
+    // alongside `refreshToken` (2.1.177 cleared only `refreshToken`) — and
+    // our accessToken *is* the proxy bearer, so a single forced refresh used
+    // to wipe the sandbox's only credential and leave every later request
+    // failing with "OAuth refresh token is no longer valid". The far-future
+    // `expiresAt` in the stub file guarded the ordinary expiry check but not
+    // a *forced* refresh, which is what Claude's 401-recovery path triggers.
+    //
+    // The stub file is still written (see `main.rs::write_stub_creds`): the
+    // `--marimo` notebook reads `accessToken` out of it directly to configure
+    // its provider. Both must carry the same token.
+    push!("-e");
+    args.push(OsString::from(format!(
+        "CLAUDE_CODE_OAUTH_TOKEN={}",
+        inputs.oauth_token
+    )));
+    push!("-e");
+    args.push(OsString::from(format!(
+        "CLAUDE_CODE_OAUTH_SCOPES={}",
+        crate::constants::STUB_OAUTH_SCOPES.join(" ")
+    )));
+    push!("-e");
+    args.push(OsString::from(format!(
+        "CLAUDE_CODE_SUBSCRIPTION_TYPE={}",
+        crate::constants::STUB_SUBSCRIPTION_TYPE
+    )));
+    push!("-e");
+    args.push(OsString::from(format!(
+        "CLAUDE_CODE_RATE_LIMIT_TIER={}",
+        crate::constants::STUB_RATE_LIMIT_TIER
+    )));
     let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".into());
     push!("-e");
     args.push(OsString::from(format!("TERM={term}")));
