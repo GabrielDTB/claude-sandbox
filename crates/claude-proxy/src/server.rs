@@ -13,7 +13,7 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use http_body_util::{BodyExt, Full};
@@ -36,7 +36,8 @@ use crate::{
     cli::ServeArgs,
     config::SystemConfig,
     constants::{
-        API_HOST, ALLOWED_PREFIXES, REQUEST_READ_TIMEOUT_S, UPSTREAM_TIMEOUT_S,
+        API_HOST, ALLOWED_PREFIXES, ORG_TYPE_TO_SUBSCRIPTION, PROFILE_URL, REQUEST_READ_TIMEOUT_S,
+        SUBSCRIPTION_PATH, SUBSCRIPTION_TTL_S, UPSTREAM_TIMEOUT_S,
     },
     creds::Credentials,
     token_store::TokenAuth,
@@ -92,6 +93,32 @@ impl UpstreamClient {
         let parsed: T = serde_json::from_slice(&bytes)?;
         Ok(parsed)
     }
+
+    /// GET a bearer-authenticated JSON resource. Used by the subscription
+    /// lookup; same timeout and error shape as [`Self::post_json`].
+    pub async fn get_json<T: DeserializeOwned>(
+        &self,
+        url: &str,
+        bearer: &str,
+    ) -> Result<T, crate::Error> {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(url)
+            .header(AUTHORIZATION, format!("Bearer {bearer}"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(box_body(Full::new(Bytes::new())))?;
+        let resp = tokio::time::timeout(Duration::from_secs(30), self.inner.request(req))
+            .await
+            .map_err(|_| "upstream request timed out")??;
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.map_err(|e| format!("read upstream body: {e}"))?.to_bytes();
+        if !status.is_success() {
+            let text = String::from_utf8_lossy(&bytes);
+            return Err(format!("HTTP {}: {}", status.as_u16(), text).into());
+        }
+        let parsed: T = serde_json::from_slice(&bytes)?;
+        Ok(parsed)
+    }
 }
 
 fn box_body<B>(b: B) -> BoxBody
@@ -110,6 +137,9 @@ struct ServerState {
     auth: TokenAuth,
     creds: Arc<Credentials>,
     http: UpstreamClient,
+    /// Plan tier + when we fetched it, for `SUBSCRIPTION_PATH`. Cached so a
+    /// sandbox launch costs a loopback round-trip rather than an upstream one.
+    subscription: tokio::sync::Mutex<Option<(Subscription, Instant)>>,
 }
 
 pub async fn run(args: ServeArgs, config: &SystemConfig) -> Result<u8, crate::Error> {
@@ -169,6 +199,7 @@ pub async fn run(args: ServeArgs, config: &SystemConfig) -> Result<u8, crate::Er
         auth,
         creds,
         http: UpstreamClient::new()?,
+        subscription: tokio::sync::Mutex::new(None),
     });
 
     // --- bind + serve ---
@@ -337,16 +368,100 @@ fn rewrite_compat_oauth_body(body: Bytes) -> Bytes {
     serde_json::to_vec(&root).map(Bytes::from).unwrap_or(body)
 }
 
+// ---------------------------------------------------------------------------
+// Subscription lookup (local route, never forwarded)
+// ---------------------------------------------------------------------------
+
+/// The entire response body of `SUBSCRIPTION_PATH`. Both fields are optional
+/// because Claude Code itself treats an unrecognised organization type, or a
+/// profile without a rate-limit tier, as `null`.
+#[derive(Clone, serde::Serialize)]
+struct Subscription {
+    #[serde(rename = "subscriptionType")]
+    subscription_type: Option<String>,
+    #[serde(rename = "rateLimitTier")]
+    rate_limit_tier: Option<String>,
+}
+
+/// The two fields we read out of the upstream profile.
+///
+/// The upstream body also carries `account.email`, `account.uuid` and
+/// `organization.uuid`. Those are deliberately absent from this struct: what
+/// we never deserialize, we can never leak into the sandbox by accident.
+#[derive(serde::Deserialize)]
+struct ProfileResp {
+    #[serde(default)]
+    organization: Option<ProfileOrg>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct ProfileOrg {
+    #[serde(default)]
+    organization_type: Option<String>,
+    #[serde(default)]
+    rate_limit_tier: Option<String>,
+}
+
+/// Map an `organization_type` to Claude Code's `subscriptionType`. Unknown
+/// types yield `None`, matching Claude Code's own `Map.get` semantics.
+fn subscription_type_for(org_type: &str) -> Option<String> {
+    ORG_TYPE_TO_SUBSCRIPTION
+        .iter()
+        .find(|(k, _)| *k == org_type)
+        .map(|(_, v)| (*v).to_string())
+}
+
+async fn handle_subscription(state: &Arc<ServerState>) -> Response<BoxBody> {
+    if let Some((sub, fetched)) = state.subscription.lock().await.as_ref() {
+        if fetched.elapsed() < Duration::from_secs(SUBSCRIPTION_TTL_S) {
+            return json_ok(sub);
+        }
+    }
+
+    let Some(access_token) = state.creds.get_access_token(&state.http).await else {
+        return unauth_envelope();
+    };
+
+    let profile: ProfileResp = match state.http.get_json(PROFILE_URL, &access_token).await {
+        Ok(p) => p,
+        Err(e) => {
+            // Not fatal for the caller: the launcher falls back to its own
+            // defaults rather than failing the sandbox launch.
+            eprintln!("[auth-proxy] subscription lookup failed: {e}");
+            return plain_error(StatusCode::BAD_GATEWAY, "profile lookup failed".into());
+        }
+    };
+
+    let org = profile.organization.unwrap_or_default();
+    let sub = Subscription {
+        subscription_type: org.organization_type.as_deref().and_then(subscription_type_for),
+        rate_limit_tier: org.rate_limit_tier,
+    };
+    *state.subscription.lock().await = Some((sub.clone(), Instant::now()));
+    json_ok(&sub)
+}
+
+// ---------------------------------------------------------------------------
+// Per-request dispatch
+// ---------------------------------------------------------------------------
+
 async fn handle(state: Arc<ServerState>, req: Request<Incoming>) -> Response<BoxBody> {
     let path = req.uri().path().to_string();
 
-    if !ALLOWED_PREFIXES.iter().any(|p| path.starts_with(p)) {
-        return plain_error(StatusCode::FORBIDDEN, format!("Path not allowed: {path}"));
-    }
-
+    // Auth first, so an unauthenticated caller can't probe which paths we
+    // forward by reading 403-vs-401 off the path allowlist below.
     let bearer = extract_bearer(&req);
     if !state.auth.check(bearer.as_deref()) {
         return plain_error(StatusCode::UNAUTHORIZED, "Unauthorized".into());
+    }
+
+    // Served locally — not forwarded, and not subject to ALLOWED_PREFIXES.
+    if path == SUBSCRIPTION_PATH {
+        return handle_subscription(&state).await;
+    }
+
+    if !ALLOWED_PREFIXES.iter().any(|p| path.starts_with(p)) {
+        return plain_error(StatusCode::FORBIDDEN, format!("Path not allowed: {path}"));
     }
 
     // --- buffer request body (with read timeout) ---
@@ -509,6 +624,21 @@ fn extract_bearer<B>(req: &Request<B>) -> Option<String> {
     Some(s[7..].trim().to_string())
 }
 
+fn json_ok<T: serde::Serialize>(value: &T) -> Response<BoxBody> {
+    let bytes = match serde_json::to_vec(value) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("[auth-proxy] json encode error: {e}");
+            return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "encode error".into());
+        }
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/json")
+        .body(box_body(Full::new(Bytes::from(bytes))))
+        .unwrap_or_else(|_| Response::new(box_body(Full::new(Bytes::new()))))
+}
+
 fn plain_error(status: StatusCode, msg: String) -> Response<BoxBody> {
     let body = Bytes::from(msg);
     Response::builder()
@@ -659,5 +789,73 @@ mod tests {
     fn compat_body_without_messages_passes_through() {
         let raw = Bytes::from(serde_json::to_vec(&serde_json::json!({ "foo": 1 })).unwrap());
         assert_eq!(rewrite_compat_oauth_body(raw.clone()), raw);
+    }
+
+    #[test]
+    fn org_types_map_to_claude_codes_subscription_names() {
+        assert_eq!(subscription_type_for("claude_max").as_deref(), Some("max"));
+        assert_eq!(subscription_type_for("claude_pro").as_deref(), Some("pro"));
+        assert_eq!(
+            subscription_type_for("claude_enterprise").as_deref(),
+            Some("enterprise")
+        );
+        assert_eq!(subscription_type_for("claude_team").as_deref(), Some("team"));
+    }
+
+    /// Claude Code reads this table as a `Map.get`, so an organization type it
+    /// doesn't know becomes `null` rather than an error. Mirror that instead of
+    /// guessing a tier the account may not have.
+    #[test]
+    fn unknown_org_type_maps_to_none() {
+        assert_eq!(subscription_type_for("claude_something_new"), None);
+        assert_eq!(subscription_type_for(""), None);
+    }
+
+    /// The wire names are a contract with the launcher, which feeds them
+    /// straight into `CLAUDE_CODE_SUBSCRIPTION_TYPE` / `..._RATE_LIMIT_TIER`.
+    /// Equally load-bearing: no account or organization identity in the body.
+    #[test]
+    fn subscription_body_carries_tier_only() {
+        let sub = Subscription {
+            subscription_type: Some("max".into()),
+            rate_limit_tier: Some("default_claude_max_20x".into()),
+        };
+        let v: serde_json::Value = serde_json::from_slice(&serde_json::to_vec(&sub).unwrap()).unwrap();
+        assert_eq!(v["subscriptionType"], "max");
+        assert_eq!(v["rateLimitTier"], "default_claude_max_20x");
+        assert_eq!(
+            v.as_object().unwrap().len(),
+            2,
+            "subscription response grew a field — identity must not leak: {v}"
+        );
+    }
+
+    /// We parse the upstream profile through a struct that has no `account`
+    /// field at all, so email / UUIDs can't survive the round-trip even if the
+    /// handler were later changed to echo what it deserialized.
+    #[test]
+    fn profile_parse_drops_account_identity() {
+        let raw = serde_json::json!({
+            "account": { "uuid": "acc-uuid", "email": "person@example.com" },
+            "organization": {
+                "uuid": "org-uuid",
+                "organization_type": "claude_max",
+                "rate_limit_tier": "default_claude_max_20x",
+            },
+        });
+        let parsed: ProfileResp = serde_json::from_slice(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        let org = parsed.organization.unwrap();
+        assert_eq!(org.organization_type.as_deref(), Some("claude_max"));
+        assert_eq!(org.rate_limit_tier.as_deref(), Some("default_claude_max_20x"));
+    }
+
+    /// A profile without an `organization` block must degrade to nulls rather
+    /// than panicking the handler.
+    #[test]
+    fn profile_without_organization_is_all_none() {
+        let parsed: ProfileResp = serde_json::from_str("{}").unwrap();
+        let org = parsed.organization.unwrap_or_default();
+        assert_eq!(org.organization_type, None);
+        assert_eq!(org.rate_limit_tier, None);
     }
 }

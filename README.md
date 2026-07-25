@@ -397,6 +397,37 @@ Stale `claude-auth-proxy-*` and `claude-sandbox-*` containers from crashed launc
 
 Only `http` and `https` schemes are accepted. Default ports: 80 / 443 respectively.
 
+### Subscription tier
+
+Claude Code shows the account's plan (`pro`, `max`, …) and rate-limit tier, but it resolves both by
+fetching `/api/oauth/profile` from a **hardcoded** `api.anthropic.com` — that request does not
+follow `ANTHROPIC_BASE_URL`, so a sandboxed Claude reaches the real API with its proxy bearer and is
+turned away. It can never learn its own tier.
+
+The proxy answers instead. It serves `GET /_sandbox/subscription` (authenticated with the same
+sandbox token, cached for 24h), which resolves the profile upstream using the real credentials and
+returns only:
+
+```json
+{ "subscriptionType": "max", "rateLimitTier": "default_claude_max_20x" }
+```
+
+The launcher fetches this at startup and exports it as `CLAUDE_CODE_SUBSCRIPTION_TYPE` /
+`CLAUDE_CODE_RATE_LIMIT_TIER`, which is where Claude Code reads the values from once
+`CLAUDE_CODE_OAUTH_TOKEN` is set.
+
+The response carries the tier and nothing else. `/api/oauth/profile` is deliberately **not** in the
+proxy's forwarded-path allowlist, because its upstream body also contains the account email and the
+account / organization UUIDs — none of which reach the sandbox.
+
+The lookup is best-effort: on a timeout, an unauthenticated proxy, or a proxy predating the route
+(it answers `403`), the launcher falls back to `pro` / `standard` and the sandbox starts normally.
+Upgrade an external proxy before expecting the real tier.
+
+Note that `/usage` and the rate-limit bars remain unavailable inside the sandbox — they call
+`/api/oauth/usage` against the same hardcoded host, and serving them would mean putting a real OAuth
+token in the sandbox.
+
 ---
 
 ## Running the proxy as a system service (NixOS)
@@ -582,6 +613,7 @@ crates/
 │       ├── state.rs                   # state dir layout, seed values, git copy
 │       ├── proxy_embedded.rs          # spawn/teardown of the auth-proxy container
 │       ├── proxy_external.rs          # URL parse + DNS + firewall carveout
+│       ├── subscription.rs            # asks the proxy for the account's plan tier
 │       ├── run.rs                     # builds and runs `podman run`
 │       ├── firewall.rs                # nftables + capability-drop script
 │       ├── notebook.rs                # --marimo entrypoint script (marimo + ACP sidecar)

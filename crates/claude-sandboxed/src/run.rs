@@ -35,6 +35,9 @@ pub struct RunInputs<'a> {
     /// `CLAUDE_CODE_OAUTH_TOKEN`. Same value as the stub credentials file's
     /// `accessToken`; see the env block below for why both exist.
     pub oauth_token: &'a str,
+    /// The account's plan tier as resolved from the auth proxy. Fields left
+    /// `None` fall back to `constants::FALLBACK_*`.
+    pub subscription: &'a crate::subscription::Subscription,
     /// true when --devenv or --flake was set.
     pub dev_env: bool,
     /// Resolved set of inherited skill directories to bind-mount
@@ -209,15 +212,30 @@ pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, 
         "CLAUDE_CODE_OAUTH_SCOPES={}",
         crate::constants::STUB_OAUTH_SCOPES.join(" ")
     )));
+    // Plan tier. With `CLAUDE_CODE_OAUTH_TOKEN` set, Claude Code reads
+    // `subscriptionType` / `rateLimitTier` from *these two variables only* —
+    // that branch returns before it ever consults `.credentials.json`. It can't
+    // resolve them itself either: it fetches them from `/api/oauth/profile` at
+    // a hardcoded `api.anthropic.com` that ignores `ANTHROPIC_BASE_URL`, so its
+    // proxy bearer is rejected there. Hence the launcher asking the proxy and
+    // handing the answer down (see `crate::subscription`).
     push!("-e");
     args.push(OsString::from(format!(
         "CLAUDE_CODE_SUBSCRIPTION_TYPE={}",
-        crate::constants::STUB_SUBSCRIPTION_TYPE
+        inputs
+            .subscription
+            .subscription_type
+            .as_deref()
+            .unwrap_or(crate::constants::FALLBACK_SUBSCRIPTION_TYPE)
     )));
     push!("-e");
     args.push(OsString::from(format!(
         "CLAUDE_CODE_RATE_LIMIT_TIER={}",
-        crate::constants::STUB_RATE_LIMIT_TIER
+        inputs
+            .subscription
+            .rate_limit_tier
+            .as_deref()
+            .unwrap_or(crate::constants::FALLBACK_RATE_LIMIT_TIER)
     )));
     let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".into());
     push!("-e");

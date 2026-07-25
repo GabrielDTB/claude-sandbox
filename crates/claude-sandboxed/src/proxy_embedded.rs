@@ -28,6 +28,10 @@ use crate::state::State;
 
 pub struct Embedded {
     pub proxy_url: String,
+    /// Same proxy, addressed from the *host* rather than from inside the
+    /// sandbox: `proxy_url` is the pasta-forwarded view and is meaningless in
+    /// the launcher's own network namespace. Used by `subscription::fetch`.
+    pub host_url: String,
     pub network: String,
     pub token: String,
     /// Podman container name, `claude-auth-proxy-<pid>`. Exposed so the
@@ -114,9 +118,11 @@ pub fn spawn(state: &State) -> Result<Embedded, crate::Error> {
         host_port
     );
     let proxy_url = format!("http://127.0.0.1:{}", paths::AUTH_PROXY_PORT);
+    let host_url = format!("http://127.0.0.1:{host_port}");
 
     Ok(Embedded {
         proxy_url,
+        host_url,
         network,
         token,
         container_name: name,

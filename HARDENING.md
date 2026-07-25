@@ -30,6 +30,7 @@
 - [x] **`/etc/resolv.conf` leak** — Podman injects host DNS config, which can expose tailnet domains and local DNS resolvers. Mitigated with `--dns 1.1.1.1 --dns 1.0.0.1 --dns 8.8.8.8` and `--dns-search .` to override with public resolvers and clear the search domain.
 - [x] **`/etc/hosts` leak** — `--hosts-file none` prevents podman from copying the host's `/etc/hosts`. Podman still injects `host.containers.internal` and the container's LAN IP (inherent to pasta's network setup), but host machine name and custom entries are no longer exposed.
 - [~] **Nix store path enumeration** — Closure store paths reveal dependency versions. Accepted — agent can discover versions through other means anyway.
+- [~] **Account plan tier** — `CLAUDE_CODE_SUBSCRIPTION_TYPE` / `CLAUDE_CODE_RATE_LIMIT_TIER` carry the account's real plan into the sandbox, resolved by the proxy via `GET /_sandbox/subscription`. Deliberate: Claude Code cannot fetch its own profile through the proxy (that request goes to a hardcoded `api.anthropic.com`), so without this it misreports the plan. The endpoint returns those two fields only — `/api/oauth/profile` is kept out of `ALLOWED_PREFIXES` precisely because its upstream body also carries the account email and the account / organization UUIDs. Account identity does not enter the sandbox.
 
 ## Already mitigated (by podman defaults + container image)
 

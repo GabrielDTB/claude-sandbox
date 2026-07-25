@@ -66,12 +66,18 @@ pub const STUB_OAUTH_SCOPES: &[&str] = &[
     "user:file_upload",
 ];
 
-/// `subscriptionType` / `rateLimitTier` reported to the sandboxed Claude Code.
-/// Claude can't reach `/api/oauth/profile` from inside the sandbox (it is
-/// addressed at `api.anthropic.com` directly, bypassing `ANTHROPIC_BASE_URL`),
-/// so these are what it displays — they are not read from the real account.
-pub const STUB_SUBSCRIPTION_TYPE: &str = "pro";
-pub const STUB_RATE_LIMIT_TIER: &str = "standard";
+/// `subscriptionType` / `rateLimitTier` reported to the sandboxed Claude Code
+/// when the real values can't be determined.
+///
+/// The real values come from the auth proxy, which holds the credentials and
+/// resolves them against `/api/oauth/profile` on our behalf (see
+/// [`crate::subscription`] for why the sandbox can't do this itself). These
+/// constants are the fallback for when that lookup doesn't answer: a proxy
+/// predating the route, an unauthenticated proxy, or a timeout. They are the
+/// conservative floor — under-reporting hides features, whereas over-reporting
+/// would offer models the API then refuses.
+pub const FALLBACK_SUBSCRIPTION_TYPE: &str = "pro";
+pub const FALLBACK_RATE_LIMIT_TIER: &str = "standard";
 
 /// In-container port the Marimo notebook server listens on under `--marimo`.
 /// Published to host loopback (`127.0.0.1:<port>:<port>`) so the user opens

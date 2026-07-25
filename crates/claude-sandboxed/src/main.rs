@@ -16,6 +16,7 @@ mod pty;
 mod reap;
 mod run;
 mod state;
+mod subscription;
 
 use std::process::{Command, ExitCode};
 
@@ -212,6 +213,7 @@ fn run() -> Result<ExitCode, Error> {
     // `embedded_guard` must stay alive until `run::run` returns — its
     // `Drop` impl kills the auth-proxy container and captures logs.
     let proxy_url: String;
+    let host_url: String;
     let network: String;
     let token: String;
     let carveout: Option<String>;
@@ -221,6 +223,7 @@ fn run() -> Result<ExitCode, Error> {
         (Some(url), Some(tok_file)) => {
             let ext = proxy_external::prepare(url, tok_file)?;
             proxy_url = ext.proxy_url;
+            host_url = ext.host_url;
             network = ext.network;
             token = ext.token;
             carveout = ext.carveout;
@@ -233,6 +236,7 @@ fn run() -> Result<ExitCode, Error> {
         _ => {
             let emb = proxy_embedded::spawn(&state)?;
             proxy_url = emb.proxy_url.clone();
+            host_url = emb.host_url.clone();
             network = emb.network.clone();
             token = emb.token.clone();
             carveout = None;
@@ -240,12 +244,18 @@ fn run() -> Result<ExitCode, Error> {
         }
     }
 
+    // The account's real plan tier, which only the proxy can resolve — see
+    // `subscription` for why a sandboxed Claude can't look it up itself. Best
+    // effort by design: `None` here just means `run.rs` falls back to
+    // `constants::FALLBACK_*`, never that the launch fails.
+    let subscription = subscription::fetch(&host_url, &token).unwrap_or_default();
+
     // Stub credentials file. The `accessToken` here IS the sandbox-to-proxy
     // bearer: claude sends it; the proxy validates, strips, and substitutes
     // the real OAuth token before forwarding upstream. Lives inside the
     // `claude/` bind-mount (writable by the sandbox) and is overwritten
     // each launch.
-    write_stub_creds(&state.stub_creds(), &token)?;
+    write_stub_creds(&state.stub_creds(), &token, &subscription)?;
 
     // Firewall script. `--marimo` publishes ports to host loopback, so allow
     // replies on those established connections (see firewall::write_script).
@@ -281,6 +291,7 @@ fn run() -> Result<ExitCode, Error> {
         container_name: &sandbox_name,
         proxy_container_name: proxy_name,
         oauth_token: &token,
+        subscription: &subscription,
         dev_env: cli.dev_env().is_some(),
         globals: &selected_globals,
     };
@@ -348,7 +359,11 @@ fn has_podman() -> bool {
 /// an unmapped subuid (shows up as e.g. `0:100000` on the host). We own
 /// the parent `claude/` dir, so we can unlink regardless of ownership;
 /// the fresh file is then created by the launching user.
-fn write_stub_creds(path: &std::path::Path, token: &str) -> Result<(), Error> {
+fn write_stub_creds(
+    path: &std::path::Path,
+    token: &str,
+    subscription: &subscription::Subscription,
+) -> Result<(), Error> {
     match std::fs::remove_file(path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -379,8 +394,19 @@ fn write_stub_creds(path: &std::path::Path, token: &str) -> Result<(), Error> {
             // env block in `run.rs`.
             "expiresAt":        4_102_444_800_000_i64,
             "scopes":           constants::STUB_OAUTH_SCOPES,
-            "subscriptionType": constants::STUB_SUBSCRIPTION_TYPE,
-            "rateLimitTier":    constants::STUB_RATE_LIMIT_TIER
+            // Claude Code's TUI reads the tier from the environment, not from
+            // here, because `CLAUDE_CODE_OAUTH_TOKEN` short-circuits the creds
+            // file entirely (see the env block in `run.rs`). We still write the
+            // same resolved values so the two emitters can't disagree if
+            // something else ever reads this file.
+            "subscriptionType": subscription
+                .subscription_type
+                .as_deref()
+                .unwrap_or(constants::FALLBACK_SUBSCRIPTION_TYPE),
+            "rateLimitTier":    subscription
+                .rate_limit_tier
+                .as_deref()
+                .unwrap_or(constants::FALLBACK_RATE_LIMIT_TIER)
         }
     });
     let mut buf = serde_json::to_vec(&body)?;
@@ -408,7 +434,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("stub-creds-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(".credentials.json");
-        write_stub_creds(&path, "deadbeef").unwrap();
+        write_stub_creds(&path, "deadbeef", &subscription::Subscription::default()).unwrap();
 
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -424,8 +450,34 @@ mod tests {
             constants::STUB_OAUTH_SCOPES.len()
         );
         assert_eq!(oauth["scopes"][1], "user:inference");
-        assert_eq!(oauth["subscriptionType"], constants::STUB_SUBSCRIPTION_TYPE);
-        assert_eq!(oauth["rateLimitTier"], constants::STUB_RATE_LIMIT_TIER);
+        // Default (proxy said nothing) → the fallback tier.
+        assert_eq!(oauth["subscriptionType"], constants::FALLBACK_SUBSCRIPTION_TYPE);
+        assert_eq!(oauth["rateLimitTier"], constants::FALLBACK_RATE_LIMIT_TIER);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// When the proxy does answer, the resolved tier — not the fallback — is
+    /// what lands in the file.
+    #[test]
+    fn stub_creds_carry_the_resolved_tier() {
+        let dir = std::env::temp_dir().join(format!("stub-creds-tier-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".credentials.json");
+        write_stub_creds(
+            &path,
+            "deadbeef",
+            &subscription::Subscription {
+                subscription_type: Some("max".into()),
+                rate_limit_tier: Some("default_claude_max_20x".into()),
+            },
+        )
+        .unwrap();
+
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["claudeAiOauth"]["subscriptionType"], "max");
+        assert_eq!(v["claudeAiOauth"]["rateLimitTier"], "default_claude_max_20x");
 
         std::fs::remove_dir_all(&dir).ok();
     }

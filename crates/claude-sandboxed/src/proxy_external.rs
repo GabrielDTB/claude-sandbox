@@ -13,6 +13,11 @@ use crate::paths;
 pub struct External {
     /// Value for ANTHROPIC_BASE_URL inside the sandbox (scheme://ip:port).
     pub proxy_url: String,
+    /// The same address, reachable from the host. Identical to `proxy_url`
+    /// here — we resolved it host-side — but kept as its own field so callers
+    /// don't have to know that the two modes differ (in embedded mode the
+    /// sandbox-side URL is a pasta-forwarded port the host can't use).
+    pub host_url: String,
     /// Podman --network value.
     pub network: String,
     /// Optional nft rule to insert before the LAN rejects.
@@ -27,8 +32,10 @@ pub fn prepare(url: &str, token_file: &Path) -> Result<External, crate::Error> {
     let carveout = format!(
         "nft add rule inet sandbox output ip daddr {ip} tcp dport {port} accept"
     );
+    let proxy_url = format!("{scheme}://{ip}:{port}");
     Ok(External {
-        proxy_url: format!("{scheme}://{ip}:{port}"),
+        host_url: proxy_url.clone(),
+        proxy_url,
         network: "pasta:--no-map-gw,--map-guest-addr,none".into(),
         carveout: Some(carveout),
         token,
