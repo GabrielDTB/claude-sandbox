@@ -85,6 +85,11 @@ impl State {
     pub fn notebook_script(&self) -> PathBuf {
         self.sandbox_dir.join("notebook-entrypoint.sh")
     }
+    /// Upstream Claude Code version this sandbox is pinned to (see
+    /// `claude_bin.rs`). Absent until the first successful resolution.
+    pub fn claude_version_file(&self) -> PathBuf {
+        self.sandbox_dir.join("claude-version")
+    }
 }
 
 pub fn prepare(

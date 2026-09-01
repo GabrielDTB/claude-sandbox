@@ -173,6 +173,24 @@ pub struct Cli {
     #[arg(long = "skill-file", value_name = "PATH", action = clap::ArgAction::Append)]
     pub skill_file: Vec<PathBuf>,
 
+    /// Re-resolve the release channel and update this sandbox's Claude
+    /// Code binary to the newest upstream version.
+    ///
+    /// Without this flag, a sandbox keeps the upstream version it recorded
+    /// at first launch. Network failures degrade to the cached/recorded
+    /// version with a warning — they never abort the launch.
+    #[arg(long = "update-claude", conflicts_with = "pinned_claude")]
+    pub update_claude: bool,
+
+    /// Run the nixpkgs Claude Code binary baked into the image instead of
+    /// the downloaded upstream release.
+    ///
+    /// The fallback the launcher also degrades to automatically when a
+    /// first-launch download fails and nothing is cached. Durable
+    /// equivalent: `claude_bin = "nixpkgs"` in config.toml.
+    #[arg(long = "pinned-claude")]
+    pub pinned_claude: bool,
+
     /// Print an annotated reference config to stdout and exit.
     ///
     /// Pipe into `~/.config/claude-sandboxed/config.toml` to bootstrap a

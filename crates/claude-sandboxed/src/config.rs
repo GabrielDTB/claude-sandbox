@@ -85,6 +85,23 @@ pub const REFERENCE: &str = "\
 # --marimo, starts the notebook's ACP agent in `bypassPermissions` mode.
 # permissive = true
 
+# --- Claude Code binary -----------------------------------------------------
+
+# Which Claude Code binary the sandbox runs.
+#   \"upstream\" (default) — download Anthropic's standalone release binary
+#       (sha256-verified against the release manifest, cached under
+#       $XDG_CACHE_HOME/claude-sandboxed/claude-bin/) and mount it over the
+#       image's PATH. Each sandbox sticks to the version it recorded at first
+#       launch until --update-claude. Download failures fall back to the
+#       cached version, then to the nixpkgs binary — never a failed launch.
+#   \"nixpkgs\" — always run the pinned nixpkgs binary baked into the image.
+#       Equivalent to passing --pinned-claude on every run.
+# claude_bin = \"upstream\"
+
+# Upstream release channel used when resolving a version (first launch of a
+# sandbox, or --update-claude): \"latest\" (default) or \"stable\".
+# claude_channel = \"latest\"
+
 # --- GitHub integration -----------------------------------------------------
 
 # Path to a file containing a GitHub PAT. When set, the PAT is injected into
@@ -178,6 +195,16 @@ pub struct Config {
     pub auth_proxy: Option<String>,
     /// Default value for `--auth-token-file` / `CLAUDE_SANDBOX_AUTH_TOKEN_FILE`.
     pub auth_token_file: Option<PathBuf>,
+    /// Which Claude Code binary the sandbox runs: `"upstream"` (download
+    /// Anthropic's standalone release, the default) or `"nixpkgs"` (the
+    /// pinned binary baked into the image). Validated by
+    /// `claude_bin::parse_mode`, not serde, so the error can name the
+    /// accepted values.
+    pub claude_bin: Option<String>,
+    /// Upstream release channel resolved on a sandbox's first launch and on
+    /// `--update-claude`: `"latest"` (default) or `"stable"`. Validated by
+    /// `claude_bin::parse_channel`.
+    pub claude_channel: Option<String>,
     /// Default value for `--gh-token-file` / `CLAUDE_SANDBOX_GH_TOKEN_FILE`.
     /// Points at a file whose contents are injected into the sandbox as
     /// `$GH_TOKEN`. Unset by default — no token is passed through.
@@ -451,6 +478,8 @@ mod tests {
         let c: Config = toml::from_str(super::REFERENCE).unwrap();
         assert!(c.auth_proxy.is_none());
         assert!(c.auth_token_file.is_none());
+        assert!(c.claude_bin.is_none());
+        assert!(c.claude_channel.is_none());
         assert!(c.gh_token_file.is_none());
         assert!(c.default_model.is_none());
         assert!(c.default_theme.is_none());
@@ -460,6 +489,19 @@ mod tests {
         assert!(c.cgroup_parent.is_none());
         assert!(c.skills.is_none());
         assert!(c.profiles.is_empty());
+    }
+
+    #[test]
+    fn parses_claude_bin_fields() {
+        let f = write_config(
+            r#"
+                claude_bin     = "nixpkgs"
+                claude_channel = "stable"
+            "#,
+        );
+        let c = parse_at(f.path()).unwrap();
+        assert_eq!(c.claude_bin.as_deref(), Some("nixpkgs"));
+        assert_eq!(c.claude_channel.as_deref(), Some("stable"));
     }
 
     #[test]

@@ -179,6 +179,8 @@ claude-sandboxed <workspace> [options] [-- claude-args...]
 | `--auth-token-file PATH` | `CLAUDE_SANDBOX_AUTH_TOKEN_FILE` | File containing the sandbox bearer token for the external proxy. |
 | `--gh-token-file PATH` | `CLAUDE_SANDBOX_GH_TOKEN_FILE` | File containing a GitHub PAT to expose inside the sandbox as `$GH_TOKEN`. Unset by default. Ignored with `--anonymous`. |
 | `--copy-git` / `--no-copy-git` | — | Force the host `.git` copy on / off for this launch, overriding config. See [Git integration](#git-integration). |
+| `--update-claude` | — | Re-resolve the upstream release channel and move this sandbox to the newest Claude Code version. Without it, a sandbox keeps the version recorded at its first launch. Conflicts with `--pinned-claude`. |
+| `--pinned-claude` | — | Run the nixpkgs Claude Code binary baked into the image instead of the downloaded upstream release. Durable equivalent: `claude_bin = "nixpkgs"` in config. |
 | `--profile NAME` | — | Inherit skills from `[profiles.NAME]` in `config.toml`. See [Inherited globals](#inherited-globals). |
 | `--skill-tag TAG` (repeatable) | — | Additional skill tag to inherit (prefix-at-segment-boundary match). Layered on top of `--profile`. |
 | `--skill-file PATH` (repeatable) | — | Specific skill directory to inherit, relative to `$XDG_DATA_HOME/claude-sandboxed/skills/`. |
@@ -257,6 +259,8 @@ Keys (see `--print-default-config` for the full annotations):
 - `default_model` — seed value for `model` in a fresh sandbox's `claude/settings.json`. First-launch only.
 - `default_theme` — seed value for `theme` in a fresh sandbox's `claude.json`. First-launch only.
 - `permissive` — durable default for `--permissive`; also seeds `skipDangerousModePermissionPrompt: true` on first launch.
+- `claude_bin` — `"upstream"` (default: download Anthropic's standalone release binary, sha256-verified and cached under `$XDG_CACHE_HOME/claude-sandboxed/claude-bin/`) or `"nixpkgs"` (always run the binary baked into the image, like `--pinned-claude`). Each sandbox sticks to the version resolved at its first launch until `--update-claude`; download failures fall back to the cached version, then to the nixpkgs binary — never a failed launch.
+- `claude_channel` — upstream release channel resolved on first launch / `--update-claude`: `"latest"` (default) or `"stable"`.
 - `copy_git_on_init` — copy host `.git` into `box-git/` on first launch (default: `true`). See [Git integration](#git-integration).
 - `copy_git_on_launch` — re-copy host `.git` into `box-git/` on every launch (default: `false`).
 - `cgroup_parent` — default value for `--cgroup-parent` / `$CLAUDE_SANDBOX_CGROUP_PARENT`.
@@ -611,6 +615,7 @@ crates/
 │       ├── cli.rs                     # clap CLI surface
 │       ├── config.rs                  # TOML config + --print-default-config
 │       ├── state.rs                   # state dir layout, seed values, git copy
+│       ├── claude_bin.rs              # upstream Claude Code download/cache/fallback
 │       ├── proxy_embedded.rs          # spawn/teardown of the auth-proxy container
 │       ├── proxy_external.rs          # URL parse + DNS + firewall carveout
 │       ├── subscription.rs            # asks the proxy for the account's plan tier

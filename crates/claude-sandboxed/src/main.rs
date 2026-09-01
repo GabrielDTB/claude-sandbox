@@ -1,3 +1,4 @@
+mod claude_bin;
 mod cli;
 mod config;
 mod constants;
@@ -106,6 +107,19 @@ fn run() -> Result<ExitCode, Error> {
     if !cli.permissive {
         cli.permissive = cfg.permissive.unwrap_or(false);
     }
+    // Which Claude Code binary the sandbox runs. `--pinned-claude` forces
+    // the baked nixpkgs binary and `--update-claude` implies upstream (the
+    // two flags conflict in clap), so the config value only matters when
+    // neither flag is given. Parsed here so a bad config value fails before
+    // any podman work.
+    let claude_mode = if cli.pinned_claude {
+        claude_bin::Mode::Nixpkgs
+    } else if cli.update_claude {
+        claude_bin::Mode::Upstream
+    } else {
+        claude_bin::parse_mode(cfg.claude_bin.as_deref())?
+    };
+    let claude_channel = claude_bin::parse_channel(cfg.claude_channel.as_deref())?;
     // Git integration mode: CLI flag overrides config entirely; otherwise
     // fall back to the config fields, with built-in defaults (init:on,
     // launch:off) for anything still unset.
@@ -183,6 +197,28 @@ fn run() -> Result<ExitCode, Error> {
     if let Some(kind) = cli.dev_env() {
         devenv::capture(&kind, &state)?;
     }
+
+    // Provision the Claude Code binary (download / cache / fallback chain —
+    // see `claude_bin.rs`). `None` means run the image's nixpkgs binary;
+    // network failures degrade to that with a warning, never a failed launch.
+    let claude_binary = match claude_bin::cache_root() {
+        Some(root) => claude_bin::provision(
+            claude_mode,
+            claude_channel,
+            cli.update_claude,
+            &state.claude_version_file(),
+            &root,
+        )?,
+        None => {
+            if claude_mode == claude_bin::Mode::Upstream {
+                eprintln!(
+                    "claude-sandboxed: no home directory for the download cache; \
+                     using the nixpkgs claude binary"
+                );
+            }
+            None
+        }
+    };
 
     // Load the sandbox image. `--marimo` uses the dedicated notebook image
     // (marimo + ACP sidecar); otherwise default or minimal per `--no-tools`
@@ -294,6 +330,7 @@ fn run() -> Result<ExitCode, Error> {
         subscription: &subscription,
         dev_env: cli.dev_env().is_some(),
         globals: &selected_globals,
+        claude_bin: claude_binary.as_deref(),
     };
     let code = run::run(&cli, &state, inputs)?;
 

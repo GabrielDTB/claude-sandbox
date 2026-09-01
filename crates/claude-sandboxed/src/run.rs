@@ -2,7 +2,9 @@
 //!
 //! Uses in-container FHS paths (`/bin/bash`, `/bin/claude`) — those
 //! symlinks exist in the image via `buildEnv`, so there's no need to
-//! thread Nix store paths through from the host.
+//! thread Nix store paths through from the host. When an upstream Claude
+//! Code binary was provisioned (`claude_bin.rs`), it is bind-mounted at
+//! `/usr/local/bin/claude` and exec'd instead of `/bin/claude`.
 
 use std::ffi::OsString;
 use std::io::IsTerminal;
@@ -44,6 +46,11 @@ pub struct RunInputs<'a> {
     /// read-only into `/home/user/.claude/skills/<name>/`. One `-v` arg
     /// per skill; empty `Selected` means no inheritance.
     pub globals: &'a Selected,
+    /// Host path of the downloaded upstream Claude Code binary, mounted
+    /// read-only at `/usr/local/bin/claude` (which shadows the image's
+    /// `/bin/claude` — the image PATH puts `/usr/local/bin` first). `None`
+    /// runs the baked nixpkgs binary. See `claude_bin.rs`.
+    pub claude_bin: Option<&'a std::path::Path>,
 }
 
 pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, crate::Error> {
@@ -167,6 +174,16 @@ pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, 
         "{}:/setup-firewall.sh:ro",
         state.firewall_script().display()
     )));
+    // Upstream Claude Code binary, when provisioned. Mounted in every mode
+    // (the notebook's ACP sidecar drives its own bundled SDK, but a shell in
+    // the sandbox still gets the fresh `claude` via PATH).
+    if let Some(bin) = inputs.claude_bin {
+        push!("-v");
+        args.push(OsString::from(format!(
+            "{}:/usr/local/bin/claude:ro",
+            bin.display()
+        )));
+    }
 
     // The stub `.credentials.json` lives inside the claude/ bind-mount
     // above (written by main.rs before launch) — no separate mount needed.
@@ -362,7 +379,11 @@ pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, 
         push!("/bin/bash");
         push!("/notebook-entrypoint.sh");
     } else {
-        push!("/bin/claude");
+        if inputs.claude_bin.is_some() {
+            push!("/usr/local/bin/claude");
+        } else {
+            push!("/bin/claude");
+        }
         if cli.permissive {
             push!("--dangerously-skip-permissions");
         }
