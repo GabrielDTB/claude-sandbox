@@ -8,7 +8,7 @@ use std::path::PathBuf;
     name = "claude-sandboxed",
     about = "Run Claude Code inside a hardened podman sandbox",
     disable_help_subcommand = true,
-    override_usage = "claude-sandboxed <workspace> [options] [-- claude-args...]",
+    override_usage = "claude-sandboxed <workspace> [options] [-- args...]",
     trailing_var_arg = true
 )]
 pub struct Cli {
@@ -89,6 +89,25 @@ pub struct Cli {
     #[arg(long = "marimo", conflicts_with = "no_tools")]
     pub marimo: bool,
 
+    /// Run this program inside the sandbox instead of Claude Code.
+    ///
+    /// PATH is resolved *inside* the container, not on the host: an absolute
+    /// path (`/bin/bash`), a path relative to `/workspace` (`./run.sh`), or a
+    /// bare name looked up on the sandbox's `$PATH` (`python3`). To run a
+    /// host program, mount it in with `--bind` and name its in-container
+    /// path here. Trailing `-- args` go to this program instead of `claude`.
+    ///
+    /// Everything else is unchanged — same image, mounts, firewall and
+    /// cap-drop, and the auth proxy still runs so `claude` keeps working
+    /// when invoked from within.
+    #[arg(
+        long = "exec",
+        value_name = "PATH",
+        conflicts_with = "marimo",
+        value_parser = clap::builder::NonEmptyStringValueParser::new()
+    )]
+    pub exec: Option<String>,
+
     /// Notebook file for `--marimo`, relative to the workspace (`/workspace`).
     ///
     /// Defaults to `notebook.py`. Absolute paths and `..` components are
@@ -98,6 +117,7 @@ pub struct Cli {
 
     /// Pass --dangerously-skip-permissions to claude. Under --marimo the
     /// notebook's ACP agent starts in `bypassPermissions` mode instead.
+    /// Under --exec no flag is injected (the program isn't `claude`).
     #[arg(long)]
     pub permissive: bool,
 
@@ -199,7 +219,8 @@ pub struct Cli {
     #[arg(long = "print-default-config")]
     pub print_default_config: bool,
 
-    /// Extra args passed through to `claude` inside the sandbox.
+    /// Extra args passed through to `claude` inside the sandbox (or to the
+    /// `--exec` program when one is given).
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub passthrough: Vec<String>,
 }
@@ -230,5 +251,44 @@ impl Cli {
             (_, true) => Some(false),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("claude-sandboxed").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn exec_defaults_to_none() {
+        let cli = parse(&["ws"]).unwrap();
+        assert_eq!(cli.exec, None);
+        assert!(cli.passthrough.is_empty());
+    }
+
+    /// Hyphen-led trailing args must reach the program, not be parsed as
+    /// launcher flags — `-c` here is bash's, and `--permissive` after the
+    /// `--` is just another argument.
+    #[test]
+    fn exec_takes_trailing_args_verbatim() {
+        let cli = parse(&["ws", "--exec", "/bin/bash", "--", "-c", "echo hi", "--permissive"])
+            .unwrap();
+        assert_eq!(cli.exec.as_deref(), Some("/bin/bash"));
+        assert_eq!(cli.passthrough, ["-c", "echo hi", "--permissive"]);
+        assert!(!cli.permissive);
+    }
+
+    #[test]
+    fn exec_rejects_empty_path() {
+        assert!(parse(&["ws", "--exec", ""]).is_err());
+    }
+
+    #[test]
+    fn exec_conflicts_with_marimo() {
+        let err = parse(&["ws", "--exec", "/bin/bash", "--marimo"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 }

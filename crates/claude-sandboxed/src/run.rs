@@ -4,7 +4,9 @@
 //! symlinks exist in the image via `buildEnv`, so there's no need to
 //! thread Nix store paths through from the host. When an upstream Claude
 //! Code binary was provisioned (`claude_bin.rs`), it is bind-mounted at
-//! `/usr/local/bin/claude` and exec'd instead of `/bin/claude`.
+//! `/usr/local/bin/claude` and exec'd instead of `/bin/claude`. `--exec`
+//! swaps that final target for a user-named program; see
+//! `container_command`.
 
 use std::ffi::OsString;
 use std::io::IsTerminal;
@@ -365,38 +367,55 @@ pub fn run(cli: &Cli, state: &State, inputs: RunInputs<'_>) -> Result<ExitCode, 
     // Image tag terminates the `podman run` flags.
     args.push(OsString::from(inputs.image_tag));
 
-    // Container-side command: /bin/bash /setup-firewall.sh [/dev-entrypoint.sh] <target>.
-    // The target is the Claude TUI by default, or the notebook entrypoint under
-    // `--marimo`. Both compose with the dev-entrypoint wrapper (which exec's
-    // its args after sourcing the dev shell).
-    push!("/bin/bash");
-    push!("/setup-firewall.sh");
-    if inputs.dev_env {
-        push!("/bin/bash");
-        push!("/dev-entrypoint.sh");
-    }
-    if cli.marimo {
-        push!("/bin/bash");
-        push!("/notebook-entrypoint.sh");
-    } else {
-        if inputs.claude_bin.is_some() {
-            push!("/usr/local/bin/claude");
-        } else {
-            push!("/bin/claude");
-        }
-        if cli.permissive {
-            push!("--dangerously-skip-permissions");
-        }
-        for a in &cli.passthrough {
-            args.push(OsString::from(a.clone()));
-        }
-    }
+    args.extend(container_command(cli, inputs.dev_env, inputs.claude_bin.is_some()));
 
     // Hand off to the pty interposer. It owns stdio end-to-end (opens a
     // pty, forks podman onto the slave, pumps bytes, intercepts ^Z) and
     // falls back to a direct spawn when stdin isn't a tty. It also
     // restores the host termios and resets SGR/cursor on the way out.
     pty::run(&args, inputs.container_name, inputs.proxy_container_name)
+}
+
+/// Container-side command, i.e. everything after the image tag:
+/// `/bin/bash /setup-firewall.sh [/bin/bash /dev-entrypoint.sh] <target> [args…]`.
+///
+/// The target is the Claude TUI by default, the notebook entrypoint under
+/// `--marimo`, or the user's program under `--exec`. All three compose with
+/// the dev-entrypoint wrapper (which exec's its args after sourcing the dev
+/// shell), and all three sit behind the firewall script — so an `--exec`
+/// program starts with the nftables rules installed and the admin caps
+/// already dropped, exactly like `claude` does.
+///
+/// The `--exec` value is passed through untouched: it names a path *inside*
+/// the container, where the final `execvp` resolves it (absolute, relative
+/// to the `/workspace` cwd, or a bare name via `$PATH`). There is nothing to
+/// validate host-side — the launcher can't see the image's filesystem.
+fn container_command(cli: &Cli, dev_env: bool, upstream_claude: bool) -> Vec<OsString> {
+    let mut cmd: Vec<OsString> = vec!["/bin/bash".into(), "/setup-firewall.sh".into()];
+    if dev_env {
+        cmd.push("/bin/bash".into());
+        cmd.push("/dev-entrypoint.sh".into());
+    }
+    if cli.marimo {
+        cmd.push("/bin/bash".into());
+        cmd.push("/notebook-entrypoint.sh".into());
+        return cmd;
+    }
+    match cli.exec.as_deref() {
+        // `--permissive` deliberately injects nothing here:
+        // `--dangerously-skip-permissions` is a `claude` flag, and
+        // `permissive = true` in config would otherwise hand it to every
+        // program. Someone exec'ing a claude wrapper passes it after `--`.
+        Some(program) => cmd.push(program.into()),
+        None => {
+            cmd.push(if upstream_claude { "/usr/local/bin/claude" } else { "/bin/claude" }.into());
+            if cli.permissive {
+                cmd.push("--dangerously-skip-permissions".into());
+            }
+        }
+    }
+    cmd.extend(cli.passthrough.iter().map(OsString::from));
+    cmd
 }
 
 /// Probe for the shared-limit user slice. The NixOS module writes the
@@ -453,4 +472,92 @@ fn gh_token(path: Option<&std::path::Path>) -> Result<Option<String>, crate::Err
         return Err(format!("gh token file is empty: {}", p.display()).into());
     }
     Ok(Some(trimmed.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn command(args: &[&str], dev_env: bool, upstream_claude: bool) -> Vec<String> {
+        let cli = Cli::try_parse_from(
+            std::iter::once("claude-sandboxed").chain(args.iter().copied()),
+        )
+        .unwrap();
+        container_command(&cli, dev_env, upstream_claude)
+            .into_iter()
+            .map(|s| s.into_string().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn default_target_is_claude() {
+        assert_eq!(
+            command(&["ws"], false, true),
+            ["/bin/bash", "/setup-firewall.sh", "/usr/local/bin/claude"]
+        );
+        assert_eq!(
+            command(&["ws"], false, false),
+            ["/bin/bash", "/setup-firewall.sh", "/bin/claude"]
+        );
+    }
+
+    #[test]
+    fn claude_gets_permissive_flag_then_passthrough() {
+        assert_eq!(
+            command(&["ws", "--permissive", "--", "--resume"], false, false),
+            [
+                "/bin/bash",
+                "/setup-firewall.sh",
+                "/bin/claude",
+                "--dangerously-skip-permissions",
+                "--resume"
+            ]
+        );
+    }
+
+    #[test]
+    fn exec_replaces_claude_and_receives_passthrough() {
+        assert_eq!(
+            command(&["ws", "--exec", "/bin/bash", "--", "-c", "echo hi"], false, true),
+            ["/bin/bash", "/setup-firewall.sh", "/bin/bash", "-c", "echo hi"]
+        );
+    }
+
+    /// The firewall script must stay first no matter what is being run —
+    /// it is what installs the nft rules and drops the admin caps.
+    #[test]
+    fn exec_stays_behind_firewall_and_dev_entrypoint() {
+        assert_eq!(
+            command(&["ws", "--exec", "./run.sh"], true, false),
+            [
+                "/bin/bash",
+                "/setup-firewall.sh",
+                "/bin/bash",
+                "/dev-entrypoint.sh",
+                "./run.sh"
+            ]
+        );
+    }
+
+    #[test]
+    fn exec_does_not_receive_the_claude_permissions_flag() {
+        assert_eq!(
+            command(&["ws", "--exec", "python3", "--permissive"], false, false),
+            ["/bin/bash", "/setup-firewall.sh", "python3"]
+        );
+    }
+
+    #[test]
+    fn marimo_target_ignores_passthrough() {
+        assert_eq!(
+            command(&["ws", "--marimo", "--", "--resume"], false, true),
+            [
+                "/bin/bash",
+                "/setup-firewall.sh",
+                "/bin/bash",
+                "/notebook-entrypoint.sh"
+            ]
+        );
+    }
 }

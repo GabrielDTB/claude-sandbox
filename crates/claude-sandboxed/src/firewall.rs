@@ -82,7 +82,8 @@ nft add rule inet sandbox output accept
 
 /// Lines 569-591 of package.nix — runs inside the container, where
 /// `python3` lives in `builtinTools`. Verbatim, single-quoted Python
-/// program; do NOT interpolate into this.
+/// program; do NOT interpolate into this (and keep it free of single quotes
+/// — one would end the shell string early).
 const CAP_DROP_PY: &str = r#"python3 -c '
 import ctypes, os, sys
 libc = ctypes.CDLL(None)
@@ -104,7 +105,13 @@ data[0].effective &= mask
 data[0].permitted &= mask
 data[0].inheritable &= mask
 libc.syscall(126, ctypes.byref(hdr), ctypes.byref(data))  # capset
-os.execvp(sys.argv[1], sys.argv[1:])
+try:
+    os.execvp(sys.argv[1], sys.argv[1:])
+except OSError as e:
+    # Reachable with a mistyped --exec path; say so instead of a traceback.
+    # Shell convention: 127 = not found (ENOENT is 2), 126 = found, not runnable.
+    sys.stderr.write("claude-sandboxed: cannot exec %s: %s\n" % (sys.argv[1], e.strerror))
+    sys.exit(127 if e.errno == 2 else 126)
 ' "$@"
 "#;
 
@@ -152,6 +159,15 @@ mod tests {
         let est = s.find("ct state established,related accept").unwrap();
         let reject = s.find("reject").unwrap();
         assert!(lo < est && est < reject);
+    }
+
+    /// The Python program is embedded in a single-quoted shell string, so a
+    /// stray `'` inside it would terminate the string and break the script.
+    /// Exactly two are allowed: the opening and closing quotes.
+    #[test]
+    fn cap_drop_python_has_no_embedded_single_quotes() {
+        assert_eq!(CAP_DROP_PY.matches('\'').count(), 2);
+        assert!(CAP_DROP_PY.trim_end().ends_with("' \"$@\""));
     }
 
     #[test]

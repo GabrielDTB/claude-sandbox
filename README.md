@@ -154,7 +154,7 @@ nix run  .#redteam           # red-team tests
 ## `claude-sandboxed` CLI
 
 ```
-claude-sandboxed <workspace> [options] [-- claude-args...]
+claude-sandboxed <workspace> [options] [-- args...]
 ```
 
 | Flag | Env | Description |
@@ -174,7 +174,8 @@ claude-sandboxed <workspace> [options] [-- claude-args...]
 | `--no-tools` | — | Use the minimal container image (core packages only, no dev tools). |
 | `--marimo` | — | Launch a [Marimo notebook](#marimo-notebook-mode) + Claude Code ACP sidecar instead of the Claude TUI. Uses the dedicated notebook image; conflicts with `--no-tools`. |
 | `--notebook-file PATH` | — | Notebook file for `--marimo`, relative to `/workspace` (default `notebook.py`). Absolute paths and `..` are rejected. |
-| `--permissive` | — | Pass `--dangerously-skip-permissions` to `claude` inside. Combined with `permissive = true` in config it also seeds `skipDangerousModePermissionPrompt: true` into a fresh sandbox's `claude/settings.json`. |
+| `--exec PATH` | — | Run `PATH` inside the sandbox instead of Claude Code. Resolved in the container, not on the host; see [Running something other than Claude](#running-something-other-than-claude). Conflicts with `--marimo`. |
+| `--permissive` | — | Pass `--dangerously-skip-permissions` to `claude` inside (nothing is injected under `--exec`). Combined with `permissive = true` in config it also seeds `skipDangerousModePermissionPrompt: true` into a fresh sandbox's `claude/settings.json`. |
 | `--auth-proxy URL` | `CLAUDE_SANDBOX_AUTH_PROXY` | Use an external proxy at `URL` instead of spawning an embedded one. Requires `--auth-token-file`. |
 | `--auth-token-file PATH` | `CLAUDE_SANDBOX_AUTH_TOKEN_FILE` | File containing the sandbox bearer token for the external proxy. |
 | `--gh-token-file PATH` | `CLAUDE_SANDBOX_GH_TOKEN_FILE` | File containing a GitHub PAT to expose inside the sandbox as `$GH_TOKEN`. Unset by default. Ignored with `--anonymous`. |
@@ -185,7 +186,7 @@ claude-sandboxed <workspace> [options] [-- claude-args...]
 | `--skill-tag TAG` (repeatable) | — | Additional skill tag to inherit (prefix-at-segment-boundary match). Layered on top of `--profile`. |
 | `--skill-file PATH` (repeatable) | — | Specific skill directory to inherit, relative to `$XDG_DATA_HOME/claude-sandboxed/skills/`. |
 | `--print-default-config` | — | Print an annotated reference `config.toml` to stdout and exit. Pipe into `~/.config/claude-sandboxed/config.toml` to bootstrap. |
-| `[-- claude-args…]` | — | Trailing arguments are passed verbatim to `claude` inside the sandbox. |
+| `[-- args…]` | — | Trailing arguments are passed verbatim to `claude` inside the sandbox, or to the `--exec` program when one is given. |
 
 Precedence for any option that also exists in the config file: **flag > env > config file > built-in default**.
 
@@ -203,6 +204,31 @@ claude-sandboxed --print-default-config > ~/.config/claude-sandboxed/config.toml
 ```
 
 Short-circuits before any filesystem or podman work, so it runs fine in environments without `$HOME` or `podman`.
+
+### Running something other than Claude
+
+`--exec PATH` launches an arbitrary program in the sandbox in place of the Claude TUI. Trailing
+`-- args` go to that program.
+
+```sh
+claude-sandboxed ~/proj --exec /bin/bash                      # a shell in the sandbox
+claude-sandboxed ~/proj --exec ./scripts/agent.sh -- --fast   # relative to /workspace
+claude-sandboxed ~/proj --exec python3 -- -m http.server      # bare name, found on $PATH
+claude-sandboxed ~/proj --bind ~/bin/tool:/usr/local/bin/tool --exec /usr/local/bin/tool
+```
+
+- `PATH` is resolved **inside the container**: absolute, relative to the `/workspace` working
+  directory, or a bare name looked up on the sandbox's `$PATH` (which includes the dev shell
+  under `--flake` / `--devenv`). A host program has to be mounted in with `--bind` first, and
+  needs its runtime dependencies present in the image — a dynamically linked host binary
+  generally won't have them.
+- Nothing about the sandbox changes: same image, mounts, firewall and capability drop — the
+  program is started by the same wrapper `claude` is. The auth proxy still runs and the usual
+  auth environment is set, so `claude` works when the program (or you, from a shell) invokes it.
+- `--permissive` does not append `--dangerously-skip-permissions`, since that is a `claude`
+  flag. Pass it after `--` if the program is a wrapper that forwards its arguments to `claude`.
+- A path that doesn't exist or isn't executable fails the launch with `cannot exec …` and exit
+  status 127 / 126.
 
 ### Marimo notebook mode
 
